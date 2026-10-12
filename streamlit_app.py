@@ -29,7 +29,31 @@ UNLOCK_SECONDS = 300   # editing stays unlocked this long, then locks itself aga
 MAX_PIN_FAILS = 5      # wrong PINs allowed before a short pause
 BLOCK_SECONDS = 60
 
-st.set_page_config(page_title="Simple Accounting", layout="wide")
+st.set_page_config(page_title="Simple Accounting", layout="wide",
+                   initial_sidebar_state="collapsed")
+
+st.markdown("""
+<style>
+.block-container {padding-top: 2.5rem; padding-bottom: 3rem; max-width: 1400px;}
+div[data-testid="stTabs"] [role="tablist"] {overflow-x: auto; flex-wrap: nowrap;}
+div[data-testid="stTabs"] button[role="tab"] {white-space: nowrap;}
+div[data-testid="stDataFrame"] {max-width: 100%; overflow-x: auto;}
+
+@media (max-width: 640px) {
+  .block-container {padding: 3.5rem 0.75rem 3rem 0.75rem;}
+  h1 {font-size: 1.6rem !important;}
+  h2, h3 {font-size: 1.2rem !important;}
+  div[data-testid="stMetricValue"] {font-size: 1.3rem;}
+  .stButton > button, .stDownloadButton > button,
+  div[data-testid="stFormSubmitButton"] > button {width: 100%; min-height: 2.8rem;}
+  input, textarea, div[data-baseweb="select"] {font-size: 16px !important;}
+  div[data-testid="stHorizontalBlock"] {gap: 0.4rem;}
+  /* hide the "Account | Debit | Credit" header row on phones (fields have placeholders) */
+  div[data-testid="stElementContainer"]:has(.hdr-row) + div[data-testid="stHorizontalBlock"],
+  div[data-testid="element-container"]:has(.hdr-row) + div[data-testid="stHorizontalBlock"] {display: none;}
+}
+</style>
+""", unsafe_allow_html=True)
 
 
 # =============================================================== small helpers
@@ -190,6 +214,7 @@ def pin_gate():
 def line_editor(led, prefix, n_rows, defaults=None):
     """Account / Debit / Credit rows. defaults = [(code, debit_text, credit_text)]."""
     options = acct_options(led)
+    st.markdown('<div class="hdr-row"></div>', unsafe_allow_html=True)
     h = st.columns([5, 2, 2])
     h[0].markdown("**Account**  (click and type to search)")
     h[1].markdown("**Debit**")
@@ -533,7 +558,6 @@ def main():
 
     with st.sidebar:
         st.header("Files")
-        st.caption(f"Data: {DATA_FILE}")
         if os.path.exists(PDF_FILE):
             with open(PDF_FILE, "rb") as f:
                 st.download_button("Download PDF report", f.read(), file_name="accounting_report.pdf",
