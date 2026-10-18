@@ -1,4 +1,5 @@
-﻿
-__pycache__/
-accounting_data.json
+﻿accounting_data.json
 accounting_security.json
+accounting_report.pdf
+__pycache__/
+*.pyc
