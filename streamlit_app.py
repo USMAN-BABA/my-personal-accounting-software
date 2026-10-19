@@ -402,14 +402,16 @@ def is_unlocked():
     return time.time() < st.session_state.get("unlocked_until", 0)
 
 
-def pin_gate():
-    """Shows the PIN screen. Returns True only while editing is unlocked."""
+def pin_gate(scope="default"):
+    """Shows the PIN screen. Returns True only while editing is unlocked.
+    `scope` must be a different string at each call site, so the PIN screen can be
+    shown in more than one place (e.g. Journal AND Backup tab) without clashing."""
     ss = st.session_state
     if is_unlocked():
         left = int(ss["unlocked_until"] - time.time())
         c1, c2 = st.columns([5, 1])
         c1.success(f"Editing is unlocked (locks again in about {max(left // 60, 0) + 1} min).")
-        if c2.button("Lock now", key="lock_now"):
+        if c2.button("Lock now", key=f"lock_now_{scope}"):
             ss["unlocked_until"] = 0
             st.rerun()
         return True
@@ -417,9 +419,9 @@ def pin_gate():
     if not pin_exists():
         st.info("First-time setup: create the accountant-only PIN (at least 6 characters). "
                 "Only the accountant should know it.")
-        p1 = st.text_input("Create PIN", type="password", key="pin_new1")
-        p2 = st.text_input("Confirm PIN", type="password", key="pin_new2")
-        if st.button("Create PIN", key="pin_create"):
+        p1 = st.text_input("Create PIN", type="password", key=f"pin_new1_{scope}")
+        p2 = st.text_input("Confirm PIN", type="password", key=f"pin_new2_{scope}")
+        if st.button("Create PIN", key=f"pin_create_{scope}"):
             if len(p1) < 6:
                 st.error("The PIN must be at least 6 characters.")
             elif p1 != p2:
@@ -438,8 +440,8 @@ def pin_gate():
     if time.time() < ss.get("pin_block_until", 0):
         st.error("Too many wrong PINs. Please wait a minute and try again.")
         return False
-    pin = st.text_input("Accountant PIN", type="password", key="pin_try")
-    if st.button("Unlock editing", key="pin_unlock"):
+    pin = st.text_input("Accountant PIN", type="password", key=f"pin_try_{scope}")
+    if st.button("Unlock editing", key=f"pin_unlock_{scope}"):
         if verify_pin(pin):
             ss["unlocked_until"] = time.time() + UNLOCK_SECONDS
             ss["pin_fails"] = 0
@@ -598,7 +600,7 @@ def edit_panel(led, e):
     if e.reversed_by or e.reverses:
         st.info("This entry is already reversed (or is itself a reversal), so it cannot be edited.")
         return
-    if not pin_gate():
+    if not pin_gate(scope=f"edit{e.id}"):
         return
     ver = ss.setdefault(f"edit_ver_{e.id}", 0)
     prefix = f"edit{e.id}_{ver}"
@@ -826,7 +828,7 @@ def tab_backup(led):
             return
         st.info(f"The file has {len(new.accounts)} accounts and {len(new.entries)} entries. "
                 f"Stored now: {len(led.accounts)} accounts and {len(led.entries)} entries.")
-        if pin_gate():
+        if pin_gate(scope="import"):
             sure = st.checkbox("Yes, replace the stored data with this file", key="import_sure")
             if st.button("Import now", key="import_btn", disabled=not sure):
                 try:
