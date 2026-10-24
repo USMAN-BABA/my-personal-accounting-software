@@ -1,14 +1,22 @@
 """
-Simple Accounting - Streamlit version (fast + colourful). Works on laptop AND phone.
+Simple Accounting - Streamlit version.  Jet Black + Cerulean Blue + Neon Rose.  Laptop AND phone.
 
 Run locally :   streamlit run streamlit_app.py
 Deploy online:  Streamlit Community Cloud + a free Neon Postgres database
 
-Keep simple_accounting.py (your own file) and storage.py in the same folder.
+Keep simple_accounting.py (your own file), storage.py and the .streamlit/config.toml file
+(dark theme colours) in the right places.
 
 Modes (picked automatically):
     * No DATABASE_URL secret  -> LOCAL mode: your JSON files on this computer, no login needed
     * DATABASE_URL secret set -> ONLINE mode: data in the database, login (APP_PASSWORD) required
+
+Month-wise books:
+    * Every screen shows ONE period: this month (default), previous month, any month, or full history.
+    * Balance-sheet accounts (Asset / Liability / Equity) carry their balance forward into the next month.
+    * Revenue / Expense start from zero each month; earlier months' profit moves into
+      "Retained Earnings (previous months)" on the Balance Sheet.
+    * Entry numbers look like 202611001 = year 2026, month 11, entry no. 001 (restarts every month).
 
 Needs Streamlit 1.37 or newer (pip install -U streamlit).
 """
@@ -21,6 +29,7 @@ import os
 import secrets
 import tempfile
 import time
+from collections import Counter
 from contextlib import redirect_stdout
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -40,14 +49,20 @@ MAX_PIN_FAILS = 5           # wrong PINs allowed before a short pause
 BLOCK_SECONDS = 60
 IDLE_LOGOUT_SECONDS = 1800  # logged out after 30 minutes without activity
 
+Z = Decimal("0")
+PL_TYPES = ("Revenue", "Expense")
 TYPE_ORDER = ["Asset", "Liability", "Equity", "Revenue", "Expense"]
-TYPE_RGB = {"Asset": "37,99,235", "Liability": "234,88,12", "Equity": "124,58,237",
-            "Revenue": "5,150,105", "Expense": "225,29,72"}
+TYPE_RGB = {"Asset": "30,167,253", "Liability": "255,46,136", "Equity": "150,130,255",
+            "Revenue": "52,214,160", "Expense": "255,176,64"}
 TYPES = [t for t in TYPE_ORDER if t in ACCOUNT_TYPES] + [t for t in ACCOUNT_TYPES if t not in TYPE_ORDER]
 
 
 def type_rgb(t):
-    return TYPE_RGB.get(t, "100,116,139")
+    return TYPE_RGB.get(t, "139,151,171")
+
+
+def debit_normal(typ):
+    return ACCOUNT_TYPES.get(typ) == "debit"
 
 
 # =============================================================== settings (secrets / environment)
@@ -86,174 +101,188 @@ def get_storage():
 STORAGE = get_storage()
 
 
-# =============================================================== look & feel
+# =============================================================== look & feel  (Jet Black / Cerulean / Neon Rose)
 CSS = """
-:root { --line: rgba(128,128,128,.28); }
-[data-testid="stMainBlockContainer"], .block-container { max-width: 1600px; padding-top: 2.4rem; padding-bottom: 5rem; }
+:root { --bg:#07080b; --s1:#0d1118; --s2:#141a25; --line:rgba(255,255,255,.09); --tx:#e9eef7; --mut:#8b97ab;
+        --blue:#1ea7fd; --blue2:#0b7fd6; --rose:#ff2e88; --rose2:#ff5fa8; }
+.stApp { color: var(--tx);
+  background: radial-gradient(1100px 520px at 88% -8%, rgba(30,167,253,.14), transparent 60%),
+              radial-gradient(900px 480px at -8% 0%, rgba(255,46,136,.10), transparent 55%), var(--bg); }
+[data-testid="stMainBlockContainer"], .block-container { max-width: 1600px; padding-top: 1.6rem; padding-bottom: 5rem; }
 header[data-testid="stHeader"] { background: transparent; }
+h1,h2,h3 { letter-spacing: -.01em; }
+hr { border-color: var(--line) !important; }
+::-webkit-scrollbar { width: 8px; height: 8px; } ::-webkit-scrollbar-thumb { background: rgba(255,255,255,.14); border-radius: 8px; }
 
-/* ---- hero banner ---- */
-.hero { background: linear-gradient(135deg,#4f46e5 0%,#7c3aed 50%,#db2777 100%); color:#fff; border-radius: 18px;
-        padding: .95rem 1.3rem; box-shadow: 0 12px 30px -12px rgba(79,70,229,.7); }
-.hero .t { font-size: 1.6rem; font-weight: 800; letter-spacing: .01em; line-height: 1.2; }
-.hero .s { font-size: .82rem; opacity: .85; }
+/* ---- brand bar ---- */
+.brand { display:flex; align-items:center; gap:.8rem; }
+.brand .logo { width:42px; height:42px; border-radius:13px; display:grid; place-items:center; font-size:1.3rem; color:#fff; flex:0 0 auto;
+  background: linear-gradient(135deg,var(--blue),var(--rose)); box-shadow: 0 0 22px rgba(30,167,253,.45), 0 0 30px rgba(255,46,136,.25); }
+.brand .bt { font-size:1.28rem; font-weight:800; line-height:1.15; }
+.brand .bt b { background: linear-gradient(90deg,var(--blue),var(--rose2)); -webkit-background-clip:text; background-clip:text; color:transparent; }
+.brand .bs { font-size:.78rem; color:var(--mut); }
+[class*="st-key-topbar"] [data-testid="stHorizontalBlock"] { flex-wrap:nowrap !important; align-items:center; gap:.4rem !important; }
+[class*="st-key-topbar"] [data-testid="stColumn"] { min-width:0 !important; }
+[class*="st-key-topbar"] [data-testid="stColumn"]:nth-child(n+2) { flex:0 0 auto !important; width:auto !important; }
+
+/* ---- pills (page menu, period, filters) ---- */
+[class*="st-key-nav"] [role="radiogroup"] { gap:.4rem; flex-wrap:wrap; }
+[class*="st-key-nav"] label[data-baseweb="radio"] { background:var(--s1); border:1px solid var(--line); border-radius:999px;
+  padding:.4rem 1rem; margin:0; cursor:pointer; transition:all .14s ease; }
+[class*="st-key-nav"] label[data-baseweb="radio"] > div:first-child { display:none; }
+[class*="st-key-nav"] label[data-baseweb="radio"]:hover { border-color:var(--blue); box-shadow:0 0 16px -4px rgba(30,167,253,.6); }
+[class*="st-key-nav"] label[data-baseweb="radio"]:has(input:checked) { background:linear-gradient(135deg,var(--blue2),var(--blue));
+  border-color:transparent; box-shadow:0 8px 22px -8px rgba(30,167,253,.9); }
+[class*="st-key-nav"] label[data-baseweb="radio"]:has(input:checked) * { color:#fff !important; font-weight:700; }
+[class*="st-key-nav"] label[data-baseweb="radio"] p { font-size:.9rem; white-space:nowrap; }
+.st-key-nav_per label[data-baseweb="radio"] { padding:.3rem .8rem; }
+.st-key-nav_per label[data-baseweb="radio"]:has(input:checked) { background:rgba(255,46,136,.14); border-color:var(--rose);
+  box-shadow:0 0 18px -4px rgba(255,46,136,.7); }
+.st-key-nav_chip label[data-baseweb="radio"] { padding:.22rem .7rem; }
+.st-key-nav_chip label[data-baseweb="radio"] p { font-size:.8rem; }
 
 /* ---- KPI cards ---- */
-.kpis { display: grid; grid-template-columns: repeat(4,1fr); gap: .8rem; margin: .9rem 0 .6rem; }
-.kpi { border-radius: 16px; padding: .75rem 1rem; color: #fff; box-shadow: 0 10px 22px -14px rgba(0,0,0,.6); }
-.kpi .l { font-size: .72rem; opacity: .92; letter-spacing: .06em; text-transform: uppercase; font-weight: 600; }
-.kpi .v { font-size: 1.5rem; font-weight: 800; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-.k1 { background: linear-gradient(135deg,#2563eb,#38bdf8); }
-.k2 { background: linear-gradient(135deg,#ea580c,#f59e0b); }
-.k3 { background: linear-gradient(135deg,#7c3aed,#c084fc); }
-.k4 { background: linear-gradient(135deg,#059669,#34d399); }
-.k4.loss { background: linear-gradient(135deg,#e11d48,#fb7185); }
+.kpis { display:grid; grid-template-columns:repeat(4,1fr); gap:.8rem; margin:.5rem 0 .9rem; }
+.kpi { border:1px solid var(--line); border-top:3px solid rgb(var(--k)); border-radius:16px; padding:.7rem 1rem;
+  background:linear-gradient(180deg,rgba(var(--k),.10),rgba(255,255,255,.015)); }
+.kpi .l { font-size:.7rem; color:var(--mut); letter-spacing:.08em; text-transform:uppercase; font-weight:700; }
+.kpi .v { font-size:1.45rem; font-weight:800; font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+.perlabel { color:var(--mut); font-size:.85rem; margin:.1rem 0 .2rem; }
+.perlabel b { color:var(--tx); }
 
-/* ---- page menu (pills) ---- */
-[class*="st-key-nav"] [role="radiogroup"] { gap: .4rem; flex-wrap: wrap; }
-[class*="st-key-nav"] label[data-baseweb="radio"] { background: rgba(128,128,128,.12); border: 1px solid var(--line);
-        border-radius: 999px; padding: .38rem .95rem; margin: 0; cursor: pointer; transition: all .12s ease; }
-[class*="st-key-nav"] label[data-baseweb="radio"] > div:first-child { display: none; }
-[class*="st-key-nav"] label[data-baseweb="radio"]:hover { background: rgba(124,58,237,.18); transform: translateY(-1px); }
-[class*="st-key-nav"] label[data-baseweb="radio"]:has(input:checked) { background: linear-gradient(135deg,#4f46e5,#7c3aed);
-        border-color: transparent; box-shadow: 0 8px 18px -8px rgba(124,58,237,.9); }
-[class*="st-key-nav"] label[data-baseweb="radio"]:has(input:checked) * { color: #fff !important; font-weight: 700; }
-[class*="st-key-nav"] label[data-baseweb="radio"] p { font-size: .92rem; }
-
-/* ---- buttons (premium) ---- */
+/* ---- buttons ---- */
 .stButton > button, [data-testid="stFormSubmitButton"] > button, .stDownloadButton > button {
-    border-radius: 12px; font-weight: 600; border: 1px solid var(--line);
-    transition: transform .08s ease, box-shadow .15s ease, filter .15s ease; }
-.stButton > button:hover, .stDownloadButton > button:hover { transform: translateY(-1px);
-    box-shadow: 0 8px 18px -8px rgba(0,0,0,.45); }
-.stButton > button:active, .stDownloadButton > button:active { transform: scale(.97); }
-button[data-testid="stBaseButton-primary"], button[kind="primary"] {
-    background: linear-gradient(135deg,#4f46e5,#7c3aed) !important; color: #fff !important; border: none !important;
-    box-shadow: 0 10px 22px -10px rgba(124,58,237,.9); }
-button[data-testid="stBaseButton-primary"]:hover, button[kind="primary"]:hover { filter: brightness(1.08); }
-[class*="st-key-post_"], [class*="st-key-post_"] [data-testid="stButton"], [class*="st-key-post_"] button { width: 100% !important; }
-[class*="st-key-post_"] button { min-height: 3.3rem; font-size: 1.08rem; font-weight: 800; letter-spacing: .02em;
-    background: linear-gradient(135deg,#059669,#10b981) !important; box-shadow: 0 12px 24px -10px rgba(5,150,105,.9) !important; }
-[data-baseweb="input"], [data-baseweb="select"] > div, [data-baseweb="textarea"] { border-radius: 10px !important; }
+  background:var(--s2); color:var(--tx); border:1px solid var(--line); border-radius:12px; font-weight:600;
+  transition:transform .08s ease, box-shadow .15s ease, border-color .15s ease; }
+.stButton > button:hover, .stDownloadButton > button:hover { border-color:var(--blue); box-shadow:0 0 18px -4px rgba(30,167,253,.6); color:#fff; }
+.stButton > button:active, .stDownloadButton > button:active { transform:scale(.97); }
+button[data-testid="stBaseButton-primary"], button[kind="primary"] { background:linear-gradient(135deg,var(--blue2),var(--blue)) !important;
+  color:#fff !important; border:none !important; box-shadow:0 10px 24px -10px rgba(30,167,253,.9); }
+[class*="st-key-post_"], [class*="st-key-post_"] [data-testid="stButton"], [class*="st-key-post_"] button { width:100% !important; }
+[class*="st-key-post_"] button { min-height:3.4rem; font-size:1.1rem; font-weight:800; letter-spacing:.03em;
+  background:linear-gradient(135deg,#e0116f,var(--rose)) !important; box-shadow:0 0 0 1px rgba(255,46,136,.5), 0 12px 30px -8px rgba(255,46,136,.85) !important; }
+[class*="st-key-post_"] button:hover { filter:brightness(1.1); }
+[class*="st-key-autobal"], [class*="st-key-autobal"] [data-testid="stButton"] { width:100% !important; }
+[class*="st-key-autobal"] button { border-style:dashed; border-color:var(--rose); color:var(--rose2); width:100%; }
+
+/* ---- inputs ---- */
+[data-baseweb="input"], [data-baseweb="base-input"], [data-baseweb="select"] > div, [data-baseweb="textarea"] {
+  background:var(--s2) !important; border-radius:12px !important; border-color:var(--line) !important; }
+[data-baseweb="input"]:focus-within, [data-baseweb="select"] > div:focus-within { border-color:var(--blue) !important;
+  box-shadow:0 0 0 3px rgba(30,167,253,.25) !important; }
+[data-testid="stExpander"] { background:var(--s1); border:1px solid var(--line) !important; border-radius:14px; }
 
 /* ---- account picker ---- */
-.thdr { background: rgb(var(--c)); color: #fff; font-weight: 800; font-size: .74rem; letter-spacing: .08em;
-        text-transform: uppercase; padding: .32rem .6rem; border-radius: 9px; text-align: center; }
-[class*="st-key-col_"] { gap: .3rem !important; }
-[class*="st-key-col_"] [data-testid="stVerticalBlock"] { gap: .3rem !important; }
-[class*="st-key-pk_"], [class*="st-key-pk_"] [data-testid="stButton"] { width: 100% !important; }
-[class*="st-key-pk_"] button { width: 100%; min-height: 2.15rem; padding: .15rem .55rem; justify-content: flex-start;
-    text-align: left; border-radius: 10px; background: rgba(var(--c),.13); border: 1px solid rgba(var(--c),.5); box-shadow: none; }
-[class*="st-key-pk_"] button p { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin: 0;
-    font-size: .8rem; font-weight: 600; text-align: left; }
-[class*="st-key-pk_"] button:hover { background: rgb(var(--c)); border-color: rgb(var(--c)); transform: none;
-    box-shadow: 0 6px 14px -6px rgba(var(--c),.9); }
-[class*="st-key-pk_"] button:hover p { color: #fff; }
-[class*="st-key-pk_sel_"] button { background: rgb(var(--c)); border-color: rgb(var(--c)); }
-[class*="st-key-pk_sel_"] button p { color: #fff; }
+.thdr { color:rgb(var(--c)); font-weight:800; font-size:.72rem; letter-spacing:.12em; text-transform:uppercase;
+  padding:.2rem .2rem .25rem; border-bottom:2px solid rgba(var(--c),.55); margin-bottom:.1rem; }
+.st-key-picker_grid [data-testid="stVerticalBlock"] { gap:.32rem !important; }
+[class*="st-key-pk_"], [class*="st-key-pk_"] [data-testid="stButton"] { width:100% !important; }
+[class*="st-key-pk_"] button { width:100%; min-height:2.2rem; padding:.15rem .6rem; justify-content:flex-start; text-align:left;
+  background:rgba(var(--c),.09); border:1px solid rgba(var(--c),.40); border-radius:10px; box-shadow:none; }
+[class*="st-key-pk_"] button p { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin:0; font-size:.8rem; font-weight:600; text-align:left; }
+[class*="st-key-pk_"] button:hover { background:rgba(var(--c),.30); border-color:rgb(var(--c)); box-shadow:0 0 16px -4px rgba(var(--c),.8); }
+[class*="st-key-pk_"][class*="_selected"] button { background:rgb(var(--c)); border-color:rgb(var(--c)); box-shadow:0 0 18px -4px rgba(var(--c),.9); }
+[class*="st-key-pk_"][class*="_selected"] button p { color:#04101a; font-weight:800; }
 
-/* ---- entry screen layout: picker left, slip right ---- */
-.st-key-entry_split { display: grid !important; grid-template-columns: 3fr 2fr; gap: 1.1rem; align-items: stretch; }
-.st-key-slippane { position: sticky; top: 3.4rem; align-self: start; }
-.st-key-slippane { border: 1px solid var(--line); border-radius: 16px; padding: .8rem .85rem;
-    background: rgba(128,128,128,.06); box-shadow: 0 14px 30px -20px rgba(0,0,0,.5); }
-.slip-title { font-weight: 800; font-size: 1.05rem; margin-bottom: .2rem; }
-.empty { border: 2px dashed var(--line); border-radius: 12px; padding: 1rem; text-align: center; opacity: .75; margin: .3rem 0 .6rem; }
-[class*="st-key-lncard_"] [data-testid="stHorizontalBlock"] { flex-wrap: nowrap !important; gap: .4rem !important; align-items: center; }
-[class*="st-key-lncard_"] [data-testid="stColumn"] { min-width: 0 !important; }
-[class*="st-key-lncard_"] input { font-size: 1.05rem; font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
-[class*="st-key-lncard_"] button { min-height: 2.4rem; padding: .1rem .5rem; }
-.lname { border-left: 5px solid rgb(var(--c)); padding-left: .55rem; font-weight: 700; overflow-wrap: anywhere; line-height: 1.25; }
-.lname small { display: block; opacity: .7; font-weight: 600; font-size: .72rem; letter-spacing: .04em; }
-
-.tot { display: grid; grid-template-columns: repeat(3,1fr); gap: .5rem; margin: .4rem 0 .3rem; }
-.tot > div { border-radius: 12px; padding: .4rem .6rem; background: rgba(128,128,128,.12); text-align: center; }
-.tot small { display: block; font-size: .66rem; letter-spacing: .08em; opacity: .75; font-weight: 700; }
-.tot b { font-size: 1.05rem; font-variant-numeric: tabular-nums; }
-.tot.ok > div { background: rgba(5,150,105,.18); }
-.tot.bad > div { background: rgba(225,29,72,.16); }
-.totmsg { text-align: center; font-weight: 700; font-size: .88rem; margin-bottom: .5rem; }
-.totmsg.ok { color: #059669; } .totmsg.bad { color: #e11d48; } .totmsg.warn { color: #d97706; }
+/* ---- entry screen: picker left, slip right ---- */
+.st-key-entry_split { display:grid !important; grid-template-columns:3fr 2fr; gap:1.1rem; align-items:stretch; }
+.st-key-slippane { position:sticky; top:3.2rem; align-self:start; border:1px solid rgba(255,46,136,.35); border-radius:18px;
+  padding:.85rem .9rem; background:linear-gradient(180deg,rgba(255,46,136,.07),rgba(255,255,255,.015));
+  box-shadow:0 0 40px -18px rgba(255,46,136,.6); }
+.st-key-pickpane { border:1px solid var(--line); border-radius:18px; padding:.85rem .9rem; background:var(--s1); }
+.ptitle { font-weight:800; font-size:1rem; margin-bottom:.35rem; display:flex; justify-content:space-between; gap:.5rem; align-items:center; }
+.ptitle small { color:var(--mut); font-weight:600; }
+.empty { border:2px dashed var(--line); border-radius:14px; padding:1rem; text-align:center; color:var(--mut); margin:.3rem 0 .6rem; font-size:.9rem; }
+[class*="st-key-lncard_"] { background:var(--s2); border-radius:14px !important; }
+[class*="st-key-lncard_"] [data-testid="stHorizontalBlock"] { flex-wrap:nowrap !important; gap:.4rem !important; align-items:center; }
+[class*="st-key-lncard_"] [data-testid="stColumn"] { min-width:0 !important; }
+[class*="st-key-lncard_"] input { font-size:1.08rem; font-weight:700; text-align:right; font-variant-numeric:tabular-nums; }
+[class*="st-key-lncard_"] button { min-height:2.3rem; padding:.1rem .5rem; }
+.lname { border-left:4px solid rgb(var(--c)); padding-left:.55rem; font-weight:700; overflow-wrap:anywhere; line-height:1.25; }
+.lname small { display:block; color:var(--mut); font-weight:600; font-size:.7rem; letter-spacing:.06em; text-transform:uppercase; }
+.tot { display:grid; grid-template-columns:repeat(3,1fr); gap:.5rem; margin:.4rem 0 .25rem; }
+.tot > div { border-radius:12px; padding:.4rem .5rem; background:rgba(255,255,255,.05); text-align:center; }
+.tot small { display:block; font-size:.62rem; letter-spacing:.1em; color:var(--mut); font-weight:700; }
+.tot b { font-size:1.02rem; font-variant-numeric:tabular-nums; }
+.tot.ok > div { background:rgba(52,214,160,.14); } .tot.bad > div { background:rgba(255,46,136,.12); }
+.totmsg { text-align:center; font-weight:700; font-size:.86rem; margin-bottom:.5rem; min-height:1.1rem; }
+.totmsg.ok { color:#34d6a0; } .totmsg.warn { color:var(--rose2); }
 
 /* ---- tables ---- */
-.tbl-wrap { overflow-x: auto; margin: .2rem 0 1rem; border: 1px solid var(--line); border-radius: 12px; }
-.tbl { width: 100%; border-collapse: collapse; font-size: .92rem; }
-.tbl th { text-align: left; font-weight: 700; padding: .55rem .65rem; white-space: nowrap; background: rgba(79,70,229,.14);
-          border-bottom: 2px solid var(--line); }
-.tbl td { padding: .45rem .65rem; border-bottom: 1px solid var(--line); vertical-align: top; overflow-wrap: anywhere; }
-.tbl tbody tr:nth-child(even) { background: rgba(128,128,128,.06); }
-.tbl tbody tr:hover { background: rgba(124,58,237,.10); }
-.tbl .r { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-.tbl th.r { text-align: right; }
-.tbl tr.sub td  { font-weight: 700; background: rgba(79,70,229,.13); }
-.tbl tr.head td { font-weight: 800; letter-spacing: .05em; background: rgba(128,128,128,.16); }
-.neg { color: #e11d48; }
+.tbl-wrap { overflow-x:auto; margin:.2rem 0 1rem; border:1px solid var(--line); border-radius:14px; background:var(--s1); }
+.tbl { width:100%; border-collapse:collapse; font-size:.9rem; }
+.tbl th { text-align:left; font-weight:700; padding:.6rem .7rem; white-space:nowrap; color:var(--blue); font-size:.74rem;
+  letter-spacing:.08em; text-transform:uppercase; background:rgba(30,167,253,.08); border-bottom:1px solid var(--line); }
+.tbl td { padding:.5rem .7rem; border-bottom:1px solid var(--line); vertical-align:top; overflow-wrap:anywhere; }
+.tbl tbody tr:hover { background:rgba(30,167,253,.07); }
+.tbl .r { text-align:right; white-space:nowrap; font-variant-numeric:tabular-nums; }
+.tbl th.r { text-align:right; }
+.tbl tr.sub td { font-weight:800; background:rgba(30,167,253,.12); border-top:1px solid rgba(30,167,253,.35); }
+.tbl tr.head td { font-weight:800; letter-spacing:.1em; font-size:.76rem; color:var(--rose2); background:rgba(255,46,136,.07); }
+.tbl .neg { color:var(--rose2); }
+.tbl .code { font-family:ui-monospace,Menlo,Consolas,monospace; color:var(--blue); white-space:nowrap; }
 
 /* ---- journal cards ---- */
-.jcard { border: 1px solid var(--line); border-left: 5px solid #4f46e5; border-radius: 12px; padding: .6rem .9rem; margin: .4rem 0;
-         background: rgba(128,128,128,.05); transition: transform .1s ease, box-shadow .15s ease; }
-.jcard:hover { transform: translateY(-1px); box-shadow: 0 10px 20px -14px rgba(0,0,0,.6); }
-.jcard .jtop { display: flex; justify-content: space-between; gap: .6rem; font-size: .84rem; opacity: .85; }
-.jcard .jamt { font-weight: 800; opacity: 1; font-variant-numeric: tabular-nums; white-space: nowrap; color: #4f46e5; }
-.jcard .jdesc { font-weight: 700; margin: .12rem 0; overflow-wrap: anywhere; }
-.jcard .jstat { font-size: .78rem; opacity: .75; }
-.jcard.rev  { opacity: .5; border-left-color: #94a3b8; }
-.jcard.revl { border-left-color: #d97706; }
+.jcard { border:1px solid var(--line); border-left:4px solid var(--blue); border-radius:14px; padding:.6rem .9rem; margin:.4rem 0;
+  background:var(--s1); transition:border-color .15s ease, box-shadow .15s ease; }
+.jcard:hover { border-color:var(--blue); box-shadow:0 0 22px -8px rgba(30,167,253,.6); }
+.jcard .jtop { display:flex; justify-content:space-between; gap:.6rem; font-size:.82rem; color:var(--mut); }
+.jcard .jno { font-family:ui-monospace,Menlo,Consolas,monospace; color:var(--blue); font-weight:700; }
+.jcard .jamt { font-weight:800; color:var(--tx); font-variant-numeric:tabular-nums; white-space:nowrap; }
+.jcard .jdesc { font-weight:700; margin:.12rem 0; overflow-wrap:anywhere; }
+.jcard .jstat { font-size:.76rem; color:var(--mut); }
+.jcard.rev { opacity:.5; border-left-color:#64748b; } .jcard.revl { border-left-color:var(--rose); }
 
 /* ---- ledger header ---- */
-.lhead { display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap; color: #fff;
-         background: linear-gradient(135deg, rgb(var(--c)), rgba(var(--c),.65)); border-radius: 16px; padding: .85rem 1.1rem;
-         margin: .9rem 0 .6rem; box-shadow: 0 12px 26px -14px rgba(var(--c),.9); }
-.lhead .lh-code { font-size: .78rem; opacity: .9; letter-spacing: .05em; text-transform: uppercase; font-weight: 700; }
-.lhead .lh-name { font-size: 1.35rem; font-weight: 800; }
-.lhead .lh-bal { text-align: right; }
-.lhead .lh-bal small { display: block; font-size: .68rem; letter-spacing: .08em; opacity: .9; font-weight: 700; }
-.lhead .lh-bal b { font-size: 1.6rem; font-variant-numeric: tabular-nums; }
+.lhead { display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap; border:1px solid var(--line);
+  border-left:5px solid rgb(var(--c)); border-radius:16px; padding:.85rem 1.1rem; margin:.9rem 0 .6rem;
+  background:linear-gradient(90deg,rgba(var(--c),.16),rgba(255,255,255,.015)); }
+.lhead .lh-code { font-size:.74rem; color:var(--mut); letter-spacing:.06em; text-transform:uppercase; font-weight:700; }
+.lhead .lh-name { font-size:1.35rem; font-weight:800; }
+.lhead .lh-note { font-size:.8rem; color:var(--mut); }
+.lhead .lh-bal { text-align:right; }
+.lhead .lh-bal small { display:block; font-size:.66rem; letter-spacing:.1em; color:var(--mut); font-weight:700; }
+.lhead .lh-bal b { font-size:1.6rem; font-variant-numeric:tabular-nums; }
 
-/* ---- login box ---- */
-.st-key-login_box { max-width: 420px; margin: 2.5rem auto 0; border: 1px solid var(--line); border-radius: 18px;
-                    padding: 1.4rem 1.5rem; box-shadow: 0 20px 40px -24px rgba(0,0,0,.6); }
+.st-key-login_box { max-width:420px; margin:2.5rem auto 0; border:1px solid var(--line); border-radius:20px; padding:1.4rem 1.5rem;
+  background:var(--s1); box-shadow:0 0 60px -20px rgba(30,167,253,.5); }
+[class*="st-key-"][class*="_rowbtns"] { max-width:440px; }
 
-[class*="st-key-"][class*="_rowbtns"] { max-width: 440px; }
-
-/* ======================= medium screens ======================= */
+/* ======================= tablets / small laptops ======================= */
 @media (max-width: 1250px) {
-  .st-key-picker_grid [data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; gap: .6rem !important; }
-  .st-key-picker_grid [data-testid="stColumn"] { flex: 1 1 calc(33% - .6rem) !important; min-width: calc(33% - .6rem) !important; }
+  .st-key-picker_grid [data-testid="stHorizontalBlock"] { flex-wrap:wrap !important; gap:.6rem !important; }
+  .st-key-picker_grid [data-testid="stColumn"] { flex:1 1 calc(33% - .6rem) !important; min-width:calc(33% - .6rem) !important; }
 }
 @media (max-width: 1000px) {
-  .st-key-entry_split { grid-template-columns: 1fr; }
-  .st-key-entry_split > :is(.st-key-slippane, :has(.st-key-slippane)) { order: -1; }
-  .st-key-slippane { position: static; }
+  .st-key-entry_split { grid-template-columns:1fr; }
+  .st-key-entry_split > :is(.st-key-slippane, :has(.st-key-slippane)) { order:-1; }
+  .st-key-slippane { position:static; }
+  .st-key-picker_grid { max-height:42vh; overflow-y:auto; padding-right:.25rem; }   /* picker scrolls inside, slip stays in view */
 }
 
 /* ======================= PHONES ======================= */
 @media (max-width: 700px) {
-  [data-testid="stMainBlockContainer"], .block-container { padding: 3rem .6rem 4rem; }
-  .hero .t { font-size: 1.25rem; }
-  .kpis { grid-template-columns: 1fr 1fr; gap: .5rem; }
-  .kpi .v { font-size: 1.1rem; }
-  .stButton button, [data-testid="stFormSubmitButton"] button, .stDownloadButton button { min-height: 2.8rem; }
-  input, [data-baseweb="select"] { font-size: 16px !important; }   /* stops iPhone zooming into fields */
-  .st-key-picker_grid [data-testid="stColumn"] { flex: 1 1 calc(50% - .6rem) !important; min-width: calc(50% - .6rem) !important; }
-  [class*="st-key-nav"] [role="radiogroup"] { flex-wrap: nowrap; overflow-x: auto; padding-bottom: .3rem; }
-  [class*="st-key-nav"] label[data-baseweb="radio"] { white-space: nowrap; }
+  [data-testid="stMainBlockContainer"], .block-container { padding:2.6rem .55rem 4rem; }
+  .brand .logo { width:36px; height:36px; font-size:1.1rem; } .brand .bt { font-size:1.08rem; } .brand .bs { font-size:.7rem; }
+  .kpis { grid-template-columns:1fr 1fr; gap:.45rem; } .kpi { padding:.5rem .7rem; } .kpi .v { font-size:1.08rem; } .kpi .l { font-size:.62rem; }
+  .stButton button, [data-testid="stFormSubmitButton"] button, .stDownloadButton button { min-height:2.8rem; }
+  input, [data-baseweb="select"] { font-size:16px !important; }
+  .st-key-picker_grid [data-testid="stColumn"] { flex:1 1 calc(50% - .6rem) !important; min-width:calc(50% - .6rem) !important; }
+  [class*="st-key-nav"] [role="radiogroup"] { flex-wrap:nowrap; overflow-x:auto; padding-bottom:.3rem; -webkit-overflow-scrolling:touch; }
+  [class*="st-key-nav"] label[data-baseweb="radio"] { flex:0 0 auto; }
+  .st-key-slippane, .st-key-pickpane { padding:.65rem .6rem; border-radius:16px; }
+  .tbl { font-size:.82rem; } .tbl th, .tbl td { padding:.4rem .45rem; }
+  .lhead .lh-name { font-size:1.1rem; } .lhead .lh-bal b { font-size:1.25rem; } .lhead .lh-bal { text-align:left; }
 
   /* edit screen lines: account on top, Debit | Credit below */
-  [class*="st-key-"][class*="_card"] [data-testid="stHorizontalBlock"] {
-        flex-direction: row !important; flex-wrap: wrap !important; gap: .5rem !important; }
-  [class*="st-key-"][class*="_card"] [data-testid="stColumn"] { min-width: 0 !important; width: auto !important;
-        flex: 1 1 calc(50% - .25rem) !important; }
-  [class*="st-key-"][class*="_card"] [data-testid="stColumn"]:nth-child(1) { flex: 1 1 100% !important; }
-
-  [class*="st-key-"][class*="_rowbtns"] [data-testid="stHorizontalBlock"] {
-        flex-direction: row !important; flex-wrap: nowrap !important; gap: .5rem !important; }
-  [class*="st-key-"][class*="_rowbtns"] [data-testid="stColumn"] { min-width: 0 !important; width: auto !important; flex: 1 1 0 !important; }
-  .tbl { font-size: .85rem; }
-  .tbl th, .tbl td { padding: .38rem .4rem; }
+  [class*="st-key-edit"][class*="_card"] [data-testid="stHorizontalBlock"] { flex-direction:row !important; flex-wrap:wrap !important; gap:.5rem !important; }
+  [class*="st-key-edit"][class*="_card"] [data-testid="stColumn"] { min-width:0 !important; width:auto !important; flex:1 1 calc(50% - .25rem) !important; }
+  [class*="st-key-edit"][class*="_card"] [data-testid="stColumn"]:nth-child(1) { flex:1 1 100% !important; }
+  [class*="st-key-"][class*="_rowbtns"] [data-testid="stHorizontalBlock"] { flex-direction:row !important; flex-wrap:nowrap !important; gap:.5rem !important; }
+  [class*="st-key-"][class*="_rowbtns"] [data-testid="stColumn"] { min-width:0 !important; width:auto !important; flex:1 1 0 !important; }
 }
 """
-CSS += "".join(f".st-key-col_{i}{{--c:{type_rgb(t)};}}\n" for i, t in enumerate(TYPES))
+CSS += "".join(f'[class*="st-key-pk_{i}_"]{{--c:{type_rgb(t)};}}\n' for i, t in enumerate(TYPES))
 
 # JS runs inside the page itself: number keypad on phones + cursor jumps into the new line's Debit box on desktop.
 _PARENT_JS = r"""
@@ -285,7 +314,7 @@ def esc(x):
     return _html.escape(str(x)).replace("$", "&#36;")
 
 
-def html_table(headers, rows, right=()):
+def html_table(headers, rows, right=(), code_cols=()):
     """rows = [(cells, css_class)]. Everything is escaped; a newline becomes a line break."""
     head = "".join(f'<th class="{"r" if i in right else ""}">{esc(t)}</th>' for i, t in enumerate(headers))
     body = []
@@ -293,7 +322,8 @@ def html_table(headers, rows, right=()):
         tds = ""
         for i, c in enumerate(cells):
             c = str(c)
-            k = ("r " if i in right else "") + ("neg" if i in right and c.startswith("-") else "")
+            k = ("r " if i in right else "") + ("code " if i in code_cols else "") + \
+                ("neg" if i in right and c.startswith("-") else "")
             tds += f'<td class="{k.strip()}">{esc(c).replace(chr(10), "<br>")}</td>'
         body.append(f'<tr class="{cls}">{tds}</tr>')
     return (f'<div class="tbl-wrap"><table class="tbl"><thead><tr>{head}</tr></thead>'
@@ -333,9 +363,16 @@ def parse_amount(text):
 
 def amt_or_zero(text):
     try:
-        return parse_amount(text) or Decimal("0")
+        return parse_amount(text) or Z
     except ValueError:
-        return Decimal("0")
+        return Z
+
+
+def drcr(net):
+    """Signed (Debit - Credit) amount -> '1,000.00 Dr' / '1,000.00 Cr' / ''."""
+    if net == 0:
+        return ""
+    return money(abs(net)) + (" Dr" if net > 0 else " Cr")
 
 
 def acct_label(led, code):
@@ -360,9 +397,29 @@ def flash(kind, message):
     st.session_state["flash"] = (kind, message)
 
 
+# ---------------------------------------------------------------- entry numbers  (YYYYMM + 3 digit counter)
+def entry_codes(led):
+    """{internal id: '202611001'}  - the counter restarts at 001 every month (month of the entry's date)."""
+    ss = st.session_state
+    m = ss.get("_codes")
+    if m and m[0] == ss.get("rev", 0):
+        return m[1]
+    counters, out = {}, {}
+    for e in led.entries:
+        ym = e.date[:4] + e.date[5:7]
+        counters[ym] = counters.get(ym, 0) + 1
+        out[e.id] = f"{ym}{counters[ym]:03d}"
+    ss["_codes"] = (ss.get("rev", 0), out)
+    return out
+
+
+def ecode(led, entry_id):
+    return entry_codes(led).get(entry_id, f"#{entry_id}")
+
+
 def entry_status(led, e):
-    status = f"Reversed by #{e.reversed_by}" if e.reversed_by else \
-        f"Reversal of #{e.reverses}" if e.reverses else "Active"
+    status = f"Reversed by {ecode(led, e.reversed_by)}" if e.reversed_by else \
+        f"Reversal of {ecode(led, e.reverses)}" if e.reverses else "Active"
     n = sum(1 for a in led.audit_log if a.get("entry_id") == e.id)
     return status + (f", edited x{n}" if n else "")
 
@@ -372,6 +429,94 @@ def lines_table_html(led, lines):
               money(Decimal(ln["debit"])) if Decimal(ln["debit"]) else "",
               money(Decimal(ln["credit"])) if Decimal(ln["credit"]) else ""], "") for ln in lines]
     return html_table(["Account", "Debit", "Credit"], rows, right=(1, 2))
+
+
+# ---------------------------------------------------------------- periods (month-wise books)
+def month_period(y, m):
+    start = date(y, m, 1)
+    nxt = date(y + (m == 12), (m % 12) + 1, 1)
+    return {"start": start.isoformat(), "end": (nxt - timedelta(days=1)).isoformat(),
+            "label": start.strftime("%B %Y"), "ym": f"{y}-{m:02d}", "kind": "month"}
+
+
+ALL_PERIOD = {"start": None, "end": None, "label": "Poori History", "ym": None, "kind": "all"}
+PER_LABELS = {"cur": "📅 Is Mahina", "prev": "⏮ Pichla Mahina", "pick": "🗓 Mahina Chunein", "all": "♾ Poori History"}
+
+
+def in_period(ds, per):
+    return (per["start"] is None or ds >= per["start"]) and (per["end"] is None or ds <= per["end"])
+
+
+def period_bar(led):
+    """Default = current month. Everything below follows this choice."""
+    with st.container(key="nav_per"):
+        mode = st.radio("Period", list(PER_LABELS), horizontal=True, key="per_mode",
+                        format_func=PER_LABELS.get, label_visibility="collapsed")
+    today = date.today()
+    if mode == "all":
+        return ALL_PERIOD
+    if mode == "prev":
+        y, m = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
+        return month_period(y, m)
+    if mode == "pick":
+        months = sorted({e.date[:7] for e in led.entries} | {today.strftime("%Y-%m")}, reverse=True)
+        ym = st.selectbox("Mahina", months, key="per_pick", label_visibility="collapsed",
+                          format_func=lambda x: month_period(int(x[:4]), int(x[5:7]))["label"])
+        return month_period(int(ym[:4]), int(ym[5:7]))
+    return month_period(today.year, today.month)
+
+
+def compute_raw(led, per):
+    """Opening / debit / credit / closing for every account in the period.
+    Asset, Liability, Equity: opening = everything before the period (carried forward).
+    Revenue, Expense: start at zero each month; earlier profit goes to `retained`."""
+    s, e = per["start"], per["end"]
+    agg = {}
+    for ent in led.entries:
+        ds = ent.date
+        if e and ds > e:
+            continue
+        inside = s is None or ds >= s
+        for ln in ent.lines:
+            a = agg.setdefault(ln["account"], [Z, Z, Z])
+            dr, cr = Decimal(ln["debit"]), Decimal(ln["credit"])
+            if inside:
+                a[1] += dr
+                a[2] += cr
+            else:
+                a[0] += dr - cr
+    rows, prev_pl = {}, Z
+    for c, acc in led.accounts.items():
+        o, dr, cr = agg.get(c, (Z, Z, Z))
+        if acc.type in PL_TYPES:
+            prev_pl += o
+            o = Z
+        close = o + dr - cr
+        sign = 1 if debit_normal(acc.type) else -1
+        rows[c] = {"code": c, "name": acc.name, "type": acc.type, "open": o, "dr": dr, "cr": cr, "close": close,
+                   "nat_close": close * sign, "nat_open": o * sign, "nat_move": (dr - cr) * sign}
+    retained = -prev_pl
+
+    def tot(typ, key):
+        return sum((r[key] for r in rows.values() if r["type"] == typ), Z)
+
+    revenue, expense = tot("Revenue", "nat_move"), tot("Expense", "nat_move")
+    net = revenue - expense
+    equity_accts = tot("Equity", "nat_close")
+    return {"rows": rows, "retained": retained, "revenue": revenue, "expense": expense, "net": net,
+            "assets": tot("Asset", "nat_close"), "liabilities": tot("Liability", "nat_close"),
+            "equity_accts": equity_accts, "equity": equity_accts + retained + net}
+
+
+def compute(led, per):
+    ss = st.session_state
+    key = (ss.get("rev", 0), per["start"], per["end"])
+    c = ss.get("_cmp")
+    if c and c[0] == key:
+        return c[1]
+    res = compute_raw(led, per)
+    ss["_cmp"] = (key, res)
+    return res
 
 
 # =============================================================== data in / out (uses YOUR engine unchanged)
@@ -407,8 +552,8 @@ def build_pdf(led):
 def drop_cache():
     """Forget the in-memory ledger so the next run reads fresh data from storage."""
     ss = st.session_state
-    ss.pop("led", None)
-    ss.pop("_tot", None)
+    for k in ("led", "_cmp", "_codes"):
+        ss.pop(k, None)
 
 
 def conflict_stop(err):
@@ -418,7 +563,7 @@ def conflict_stop(err):
 
 
 def save_all(led):
-    """Save to the database (or local file). Fast: no PDF is built here any more."""
+    """Save to the database (or local file). Fast: no PDF is built here."""
     ss = st.session_state
     try:
         ss["ledger_version"] = STORAGE.write("ledger", ledger_to_text(led), ss.get("ledger_version", 0))
@@ -466,15 +611,6 @@ def get_ledger():
     return ss["led"]
 
 
-def totals(led):
-    ss = st.session_state
-    m = ss.get("_tot")
-    if not m or m[0] != ss.get("rev", 0):
-        m = (ss.get("rev", 0), led.totals_by_type())
-        ss["_tot"] = m
-    return m[1]
-
-
 # =============================================================== login (online mode)
 @st.cache_resource
 def login_guard():
@@ -501,7 +637,8 @@ def check_login():
     drop_cache()
 
     with st.container(key="login_box"):
-        st.html('<div class="hero"><div class="t">📒 Simple Accounting</div><div class="s">Please log in</div></div>')
+        st.html('<div class="brand"><div class="logo">◆</div><div><div class="bt">Simple <b>Accounting</b></div>'
+                '<div class="bs">Please log in</div></div></div>')
         with st.form("login_form"):
             user = st.text_input("Username", key="login_user")
             pw = st.text_input("Password", type="password", key="login_pw")
@@ -604,34 +741,61 @@ def pin_gate(scope="default"):
     return False
 
 
-# =============================================================== the account picker (all accounts on screen, 1 click)
+# =============================================================== the account picker (one click)
+def frequent_accounts(led, n=14):
+    c = Counter()
+    for e in led.entries[-300:]:
+        for ln in e.lines:
+            c[ln["account"]] += 1
+    return [code for code, _ in c.most_common(n) if code in led.accounts]
+
+
+def _pick_button(code, acc, scope, on_pick, selected):
+    ti = TYPES.index(acc.type) if acc.type in TYPES else 0
+    st.button(f"{code}  {acc.name}", key=f"pk_{ti}_{scope}_{code}" + ("_selected" if code in selected else ""),
+              on_click=on_pick, args=(code,), help=acc.name)
+
+
 def account_picker(led, scope, on_pick, selected=()):
-    """Every account as a coloured button, grouped by type. Clicking calls on_pick(code)."""
-    q = st.text_input("Search account", key=f"{scope}_q", label_visibility="collapsed",
-                      placeholder="🔎 Account dhoondein (naam ya code)...")
-    ql = q.strip().lower()
-    groups = {t: [] for t in TYPES}
-    for c, a in sorted(led.accounts.items()):
-        if ql and ql not in c.lower() and ql not in a.name.lower():
-            continue
-        groups.setdefault(a.type, []).append((c, a))
+    """Every account as a coloured button. Filter chips + search keep it quick on a phone."""
     selected = set(selected)
+    q = st.text_input("Search account", key=f"{scope}_q", label_visibility="collapsed",
+                      placeholder="🔎 Account dhoondein (naam ya code)")
+    with st.container(key="nav_chip"):
+        flt = st.radio("Filter", ["Sab", "⚡ Aam"] + TYPES, horizontal=True, key=f"{scope}_f", label_visibility="collapsed")
+    ql = q.strip().lower()
+    items = sorted(led.accounts.items())
     with st.container(key="picker_grid"):
         cols = st.columns(len(TYPES))
-        for i, (t, col) in enumerate(zip(TYPES, cols)):
-            with col, st.container(key=f"col_{i}"):
-                if not groups.get(t):
-                    continue
-                st.html(f'<div class="thdr" style="--c:{type_rgb(t)}">{esc(t)}</div>')
-                for c, a in groups[t]:
-                    sel = "sel_" if c in selected else ""
-                    st.button(f"{c}  {a.name}", key=f"pk_{sel}{scope}_{c}", on_click=on_pick, args=(c,), help=a.name)
+        if ql or flt != "Sab":
+            if ql:
+                items = [(c, a) for c, a in items if ql in c.lower() or ql in a.name.lower()]
+            elif flt == "⚡ Aam":
+                freq = frequent_accounts(led)
+                items = [(c, led.accounts[c]) for c in freq]
+            else:
+                items = [(c, a) for c, a in items if a.type == flt]
+            if not items:
+                st.caption("Kuch nahi mila." if ql else "Abhi koi entry nahi - 'Sab' chunein.")
+            for i, (c, a) in enumerate(items):
+                with cols[i % len(cols)]:
+                    _pick_button(c, a, scope, on_pick, selected)
+        else:
+            groups = {t: [] for t in TYPES}
+            for c, a in items:
+                groups.setdefault(a.type, []).append((c, a))
+            for t, col in zip(TYPES, cols):
+                with col:
+                    if groups.get(t):
+                        st.html(f'<div class="thdr" style="--c:{type_rgb(t)}">{esc(t)}</div>')
+                    for c, a in groups.get(t, []):
+                        _pick_button(c, a, scope, on_pick, selected)
 
 
 # =============================================================== entry slip (state helpers)
 def slip_totals(exclude=None):
     ss = st.session_state
-    dr = cr = Decimal("0")
+    dr = cr = Z
     for ln in ss.get("slip", []):
         if ln["id"] == exclude:
             continue
@@ -650,8 +814,12 @@ def add_line(code):
     ss[f"ln_c_{lid}"] = dec_str(dr - cr) if dr > cr else ""
 
 
-def balance_line(lid):
+def balance_last():
     ss = st.session_state
+    slip = ss.get("slip", [])
+    if not slip:
+        return
+    lid = slip[-1]["id"]
     dr, cr = slip_totals(exclude=lid)
     diff = dr - cr
     if diff > 0:
@@ -677,7 +845,7 @@ def clear_slip():
 
 
 def rows_totals(rows):
-    dr = cr = Decimal("0")
+    dr = cr = Z
     bad = False
     for _, d, c in rows:
         for text, is_debit in ((d, True), (c, False)):
@@ -701,28 +869,27 @@ def parse_rows(rows):
         dv, cv = parse_amount(d), parse_amount(c)
         if (dv is None) == (cv is None):
             raise ValueError(f"Line {n}: type either a Debit or a Credit amount (not both, not neither)")
-        lines.append((label_code(acct), dv or Decimal("0"), cv or Decimal("0")))
+        lines.append((label_code(acct), dv or Z, cv or Z))
     return lines
 
 
 def totals_html(rows):
     dr, cr, bad = rows_totals(rows)
     if bad:
-        cls, msg = "bad", "⚠️ Kuch amounts sahi number nahi hain"
+        cls, mcls, msg = "bad", "warn", "⚠️ Kuch amounts sahi number nahi hain"
     elif dr == cr and dr > 0:
-        cls, msg = "ok", "✅ Balanced - ab POST kar dein"
+        cls, mcls, msg = "ok", "ok", "✅ Balanced - ab POST kar dein"
     elif dr == 0 and cr == 0:
-        cls, msg = "", ""
+        cls, mcls, msg = "", "", ""
     else:
-        cls, msg = "bad", "Debit aur Credit abhi barabar nahi"
-    mcls = {"ok": "ok", "bad": "warn"}.get(cls, "")
+        cls, mcls, msg = "bad", "warn", "Debit aur Credit abhi barabar nahi"
     return (f'<div class="tot {cls}"><div><small>DEBIT</small><b>{esc(money(dr))}</b></div>'
             f'<div><small>CREDIT</small><b>{esc(money(cr))}</b></div>'
             f'<div><small>FARQ</small><b>{esc(money(abs(dr - cr)))}</b></div></div>'
             f'<div class="totmsg {mcls}">{esc(msg)}</div>')
 
 
-# =============================================================== New Entry page
+# =============================================================== page: Entry
 @st.fragment
 def entry_fragment():
     """Only this block reruns while you click accounts / type amounts - so it feels instant."""
@@ -734,38 +901,39 @@ def entry_fragment():
 
     with st.container(key="entry_split"):
         with st.container(key="pickpane"):
-            st.html('<div class="slip-title">👆 Account par click karein</div>')
+            st.html('<div class="ptitle">1 · Account chunein</div>')
             account_picker(led, "ent", add_line, selected=used)
 
         with st.container(key="slippane"):
-            st.html('<div class="slip-title">🧾 Entry Slip</div>')
+            st.html(f'<div class="ptitle">2 · Amount likhein <small>{len(slip)} line{"s" if len(slip) != 1 else ""}</small></div>')
             c1, c2 = st.columns([2, 3])
             d = c1.date_input("Date", value=date.today(), key=f"date_{fid}", format="DD/MM/YYYY")
             desc = c2.text_input("Description", key=f"desc_{fid}", placeholder="e.g. RECV FROM KHALID")
 
             if not slip:
-                st.html('<div class="empty">👈 Left se account par click karein - line yahan add ho jayegi.<br>'
+                st.html('<div class="empty">Account par click karein - line yahan aa jayegi.<br>'
                         'Doosra account chunenge to baqi amount khud bhar jayegi.</div>')
             rows = []
             for ln in list(slip):
                 lid, code = ln["id"], ln["code"]
                 a = led.accounts.get(code)
-                rgb = type_rgb(a.type) if a else "100,116,139"
+                rgb = type_rgb(a.type) if a else "139,151,171"
                 with st.container(border=True, key=f"lncard_{lid}"):
                     t1, t2 = st.columns([8, 1])
                     t1.html(f'<div class="lname" style="--c:{rgb}">{esc(code)} - {esc(a.name if a else "?")}'
                             f'<small>{esc(a.type if a else "")}</small></div>')
                     t2.button("✕", key=f"rm_{lid}", on_click=remove_line, args=(lid,), help="Line hatayein")
-                    b1, b2, b3 = st.columns([3, 3, 1])
+                    b1, b2 = st.columns(2)
                     dtxt = b1.text_input("Debit", key=f"ln_d_{lid}", label_visibility="collapsed", placeholder="Debit")
                     ctxt = b2.text_input("Credit", key=f"ln_c_{lid}", label_visibility="collapsed", placeholder="Credit")
-                    b3.button("⚖", key=f"bal_{lid}", on_click=balance_line, args=(lid,),
-                              help="Is line ko balance karne wali amount bhar do")
                 rows.append((acct_label(led, code), dtxt, ctxt))
 
             st.html(totals_html(rows))
+            dr_, cr_, bad_ = rows_totals(rows)
+            if len(slip) >= 2 and dr_ != cr_ and not bad_:
+                st.button("⚖ Aakhri line se farq barabar karein", key="autobal", on_click=balance_last)
             p1, p2 = st.columns([3, 1])
-            post = p1.button("✅  POST ENTRY", key="post_btn", type="primary")
+            post = p1.button("POST ENTRY", key="post_btn", type="primary")
             p2.button("Clear", key="clear_btn", on_click=clear_slip)
 
     if post:
@@ -773,7 +941,7 @@ def entry_fragment():
             if not desc.strip():
                 raise ValueError("Please type a description")
             lines = parse_rows(rows)
-            dr, cr, _ = rows_totals([("", d_, c_) for _, d_, c_ in rows])
+            dr, cr, _ = rows_totals(rows)
             if dr != cr:
                 raise ValueError(f"Debit ({money(dr)}) aur Credit ({money(cr)}) barabar nahi hain")
             e = led.post_entry(desc.strip(), lines, d.isoformat())
@@ -781,57 +949,16 @@ def entry_fragment():
             st.error(str(err))
         else:
             save_all(led)
-            flash("success", f"Entry #{e.id} posted and saved.")
+            flash("success", f"Entry {ecode(led, e.id)} posted and saved.")
             clear_slip()
             st.rerun()
 
 
-def page_new_entry(led):
+def page_entry(led, per):
     entry_fragment()
-    st.divider()
-    with st.expander("Initial investment (opening transaction)"):
-        with st.form("initial_form", clear_on_submit=True):
-            assets, equity = acct_options(led, "Asset"), acct_options(led, "Equity")
-            amt = st.text_input("Amount invested by owner")
-            dep = st.selectbox("Deposit into", assets, index=default_index(assets, led, "1010"))
-            cap = st.selectbox("Capital account", equity, index=default_index(equity, led, "3000"))
-            idate = st.date_input("Date", value=date.today())
-            if st.form_submit_button("Post initial investment", key="initial_submit"):
-                try:
-                    a = parse_amount(amt)
-                    if a is None or not dep or not cap:
-                        raise ValueError("Please fill in the amount and both accounts")
-                    e = led.initial_investment(a, label_code(dep), label_code(cap), entry_date=idate.isoformat())
-                except (ValueError, InvalidOperation) as err:
-                    st.error(str(err))
-                else:
-                    save_all(led)
-                    flash("success", f"Initial investment posted as entry #{e.id}.")
-                    st.rerun()
-    with st.expander("Transfer money between accounts"):
-        with st.form("transfer_form", clear_on_submit=True):
-            assets = acct_options(led, "Asset")
-            src = st.selectbox("From", assets, index=default_index(assets, led, "1010"))
-            dst = st.selectbox("To", assets, index=default_index(assets, led, "1020"))
-            amt = st.text_input("Amount")
-            note = st.text_input("Description / note (optional)")
-            tdate = st.date_input("Date", value=date.today())
-            if st.form_submit_button("Post transfer", key="transfer_submit"):
-                try:
-                    a = parse_amount(amt)
-                    if a is None or not src or not dst:
-                        raise ValueError("Please fill in the amount and both accounts")
-                    e = led.transfer(label_code(src), label_code(dst), a, note.strip(),
-                                     entry_date=tdate.isoformat())
-                except (ValueError, InvalidOperation) as err:
-                    st.error(str(err))
-                else:
-                    save_all(led)
-                    flash("success", f"Transfer posted as entry #{e.id}.")
-                    st.rerun()
 
 
-# =============================================================== Journal page (view / edit / reverse)
+# =============================================================== page: Journal
 def line_editor(led, prefix, n_rows, defaults=None):
     """One card per line: Account, Debit, Credit. defaults = [(code, debit_text, credit_text)]."""
     options = acct_options(led)
@@ -919,24 +1046,26 @@ def edit_panel(led, e):
             "after": {"date": e.date, "description": e.description, "lines": [dict(x) for x in e.lines]},
         })
         save_all(led)
-        flash("success", f"Entry #{e.id} updated. The old values are kept in the edit history.")
+        flash("success", f"Entry {ecode(led, e.id)} updated. The old values are kept in the edit history.")
         ss[f"edit_ver_{e.id}"] = ver + 1
         st.rerun()
 
 
-def page_journal(led):
-    if not led.entries:
-        st.info("No entries yet.")
+def page_journal(led, per):
+    codes = entry_codes(led)
+    pool = [e for e in led.entries if in_period(e.date, per)]
+    if not pool:
+        st.info(f"{per['label']} me koi entry nahi.")
         return
     c1, c2 = st.columns([3, 1])
     q = c1.text_input("Search", key="journal_q", label_visibility="collapsed",
-                      placeholder="🔎 Description, date ya entry number se dhoondein")
+                      placeholder="🔎 Description, date ya entry number")
     limit = c2.selectbox("Show", ["Last 20", "Last 50", "All"], key="journal_limit", label_visibility="collapsed")
-    n = {"Last 20": 20, "Last 50": 50}.get(limit, len(led.entries))
-    ql = q.strip().lower().lstrip("#")
+    n = {"Last 20": 20, "Last 50": 50}.get(limit, len(pool))
+    ql = q.strip().lower()
     items = []
-    for e in reversed(led.entries):
-        if ql and ql not in e.description.lower() and ql not in e.date and ql != str(e.id):
+    for e in reversed(pool):
+        if ql and ql not in e.description.lower() and ql not in e.date and ql not in codes.get(e.id, ""):
             continue
         items.append(e)
         if len(items) >= n:
@@ -947,19 +1076,19 @@ def page_journal(led):
 
     cards = []
     for e in items:
-        total = sum((Decimal(x["debit"]) for x in e.lines), Decimal("0"))
+        total = sum((Decimal(x["debit"]) for x in e.lines), Z)
         cls = "rev" if e.reversed_by else "revl" if e.reverses else ""
-        cards.append(f'<div class="jcard {cls}"><div class="jtop"><span>#{e.id} &middot; {esc(e.date)}</span>'
-                     f'<span class="jamt">{esc(money(total))}</span></div>'
+        cards.append(f'<div class="jcard {cls}"><div class="jtop"><span><span class="jno">{esc(codes.get(e.id, e.id))}</span>'
+                     f' &middot; {esc(e.date)}</span><span class="jamt">{esc(money(total))}</span></div>'
                      f'<div class="jdesc">{esc(e.description)}</div>'
                      f'<div class="jstat">{esc(entry_status(led, e))}</div></div>')
     show_html("".join(cards))
 
-    st.subheader("Entry dekhein / edit / delete karein")
-    names = {x.id: f"#{x.id} | {x.date} | {x.description}" for x in items}
+    st.subheader("Entry kholein")
+    names = {x.id: f"{codes.get(x.id, x.id)} | {x.date} | {x.description}" for x in items}
     chosen = st.selectbox("Pick an entry", list(names), format_func=lambda i: names[i], key="journal_pick")
     e = led.get_entry(chosen)
-    st.caption(f"Entry #{e.id}  -  {entry_status(led, e)}")
+    st.caption(f"Entry {codes.get(e.id, e.id)}  -  {entry_status(led, e)}")
     show_html(lines_table_html(led, e.lines))
     hist = [a for a in led.audit_log if a.get("entry_id") == e.id]
     if hist:
@@ -975,7 +1104,7 @@ def page_journal(led):
                     show_html(lines_table_html(led, af.get("lines", [])))
 
     with st.container(key="nav_j"):
-        mode = st.radio("Action", ["✏️ Edit (accountant PIN)", "🗑 Delete (reverse)"], horizontal=True,
+        mode = st.radio("Action", ["✏️ Edit (PIN)", "🗑 Delete (reverse)"], horizontal=True,
                         key="journal_mode", label_visibility="collapsed")
     if mode.startswith("✏️"):
         edit_panel(led, e)
@@ -984,104 +1113,176 @@ def page_journal(led):
     else:
         st.caption("An opposite entry is posted, so the books stay correct and the history is kept.")
         reason = st.text_input("Reason (optional)", key=f"rev_reason_{e.id}")
-        sure = st.checkbox(f"Yes, reverse entry #{e.id}", key=f"rev_sure_{e.id}")
+        sure = st.checkbox(f"Yes, reverse entry {codes.get(e.id, e.id)}", key=f"rev_sure_{e.id}")
         if st.button("Delete (reverse) entry", key=f"rev_btn_{e.id}", disabled=not sure):
+            old = codes.get(e.id, e.id)
             try:
                 rev = led.reverse_entry(e.id, reason.strip())
             except ValueError as err:
                 st.error(str(err))
             else:
                 save_all(led)
-                flash("success", f"Entry #{e.id} cancelled by reversal entry #{rev.id}.")
+                flash("success", f"Entry {old} cancelled by reversal entry {ecode(led, rev.id)}.")
                 st.rerun()
 
 
-# =============================================================== Ledger page (one click -> ledger opens, stays on this page)
-def page_ledger(led):
+# =============================================================== page: Ledger (one click -> opens, stays on this page)
+def page_ledger(led, per):
     ss = st.session_state
 
     def pick(code):
         ss["ledger_code"] = code
 
     sel = ss.get("ledger_code")
-    st.html('<div class="slip-title">👆 Account par click karein - ledger foran khul jayegi</div>')
-    account_picker(led, "led", pick, selected=(sel,) if sel else ())
+    with st.container(key="pickpane"):
+        st.html('<div class="ptitle">Account chunein - ledger foran khul jayegi</div>')
+        account_picker(led, "led", pick, selected=(sel,) if sel else ())
     if sel not in led.accounts:
         st.info("Upar se koi bhi account chunein.")
         return
 
-    code, a = sel, led.accounts[sel]
-    normal_debit = ACCOUNT_TYPES[a.type] == "debit"
+    a = led.accounts[sel]
+    is_pl = a.type in PL_TYPES
+    sign = 1 if debit_normal(a.type) else -1
+    codes = entry_codes(led)
+    s, e = per["start"], per["end"]
 
-    p1, p2, p3 = st.columns([2, 2, 2])
-    period = p1.selectbox("Period", ["Sab", "Is mahine", "Pichhle 30 din", "Is saal", "Custom"], key="led_period")
-    today = date.today()
-    start = end = None
-    if period == "Is mahine":
-        start = today.replace(day=1)
-    elif period == "Pichhle 30 din":
-        start = today - timedelta(days=30)
-    elif period == "Is saal":
-        start = today.replace(month=1, day=1)
-    elif period == "Custom":
-        start = p2.date_input("From", value=today.replace(day=1), key="led_from", format="DD/MM/YYYY")
-        end = p3.date_input("To", value=today, key="led_to", format="DD/MM/YYYY")
-    s_iso, e_iso = (start.isoformat() if start else None), (end.isoformat() if end else None)
+    prev = Z
+    inside = []
+    for ent in led.entries:
+        for ln in ent.lines:
+            if ln["account"] != sel:
+                continue
+            dr, cr = Decimal(ln["debit"]), Decimal(ln["credit"])
+            if s and ent.date < s:
+                prev += dr - cr
+            elif e and ent.date > e:
+                continue
+            else:
+                inside.append((ent.date, codes.get(ent.id, "?"), ent.description, dr, cr))
+    inside.sort(key=lambda x: x[0])
 
-    def signed(dr, cr):
-        return (dr - cr) if normal_debit else (cr - dr)
-
-    opening = Decimal("0")
-    body = []
-    for d, desc, dr, cr in led.ledger_for(code):
-        ds = str(d)
-        if s_iso and ds < s_iso:
-            opening += signed(dr, cr)
-        elif e_iso and ds > e_iso:
-            continue
-        else:
-            body.append((ds, desc, dr, cr))
-
-    run, tdr, tcr = opening, Decimal("0"), Decimal("0")
+    opening = Z if is_pl else prev * sign
+    run, tdr, tcr = opening, Z, Z
     out = []
-    if s_iso:
-        out.append((["", "Opening balance", "", "", money(opening)], "sub"))
-    for ds, desc, dr, cr in body:
-        run += signed(dr, cr)
+    if s:
+        out.append((["", "", "Opening (naya mahina)" if is_pl else "Opening balance (pichle mahine se)", "", "", money(opening)], "sub"))
+    for ds, code, desc, dr, cr in inside:
+        run += (dr - cr) * sign
         tdr += dr
         tcr += cr
-        out.append(([ds, desc, money(dr) if dr else "", money(cr) if cr else "", money(run)], ""))
-    out.append((["", "TOTAL / Closing", money(tdr), money(tcr), money(run)], "sub"))
+        out.append(([ds, code, desc, money(dr) if dr else "", money(cr) if cr else "", money(run)], ""))
+    out.append((["", "", "TOTAL / Closing", money(tdr), money(tcr), money(run)], "sub"))
 
+    note = ""
+    if is_pl and s and prev != 0:
+        note = f'<div class="lh-note">Pichle mahinon ka total: {esc(money(abs(prev)))} (is mahine ke hisab me shamil nahi)</div>'
     st.html(f'<div class="lhead" style="--c:{type_rgb(a.type)}"><div>'
-            f'<div class="lh-code">{esc(code)} &middot; {esc(a.type)} &middot; {len(body)} transactions</div>'
-            f'<div class="lh-name">{esc(a.name)}</div></div>'
+            f'<div class="lh-code">{esc(sel)} &middot; {esc(a.type)} &middot; {esc(per["label"])} &middot; {len(inside)} transactions</div>'
+            f'<div class="lh-name">{esc(a.name)}</div>{note}</div>'
             f'<div class="lh-bal"><small>CLOSING BALANCE</small><b>{esc(money(run))}</b></div></div>')
-    if body or s_iso:
-        show_html(html_table(["Date", "Description", "Debit", "Credit", "Balance"], out, right=(2, 3, 4)))
+    if inside or s:
+        show_html(html_table(["Date", "Entry #", "Description", "Debit", "Credit", "Balance"], out,
+                             right=(3, 4, 5), code_cols=(1,)))
     else:
         st.info("Is account me abhi koi transaction nahi.")
 
     buf = io.StringIO()
     w = csv.writer(buf)
-    w.writerow(["Date", "Description", "Debit", "Credit", "Balance"])
+    w.writerow(["Date", "Entry No", "Description", "Debit", "Credit", "Balance"])
     r2 = opening
-    for ds, desc, dr, cr in body:
-        r2 += signed(dr, cr)
-        w.writerow([ds, desc, dec_str(dr) if dr else "", dec_str(cr) if cr else "", dec_str(r2)])
-    st.download_button("⬇️ Ledger CSV download", buf.getvalue().encode("utf-8"),
-                       file_name=f"ledger_{code}_{today.isoformat()}.csv", mime="text/csv", key="dl_ledger")
+    for ds, code, desc, dr, cr in inside:
+        r2 += (dr - cr) * sign
+        w.writerow([ds, code, desc, dec_str(dr) if dr else "", dec_str(cr) if cr else "", dec_str(r2)])
+    st.download_button("⬇️ Ledger CSV", buf.getvalue().encode("utf-8"),
+                       file_name=f"ledger_{sel}_{per['ym'] or 'all'}.csv", mime="text/csv", key="dl_ledger")
 
 
-# =============================================================== Accounts / Reports / History / Backup
-def page_accounts(led):
-    q = st.text_input("Search accounts by code or name", key="acct_search", placeholder="e.g. bank or 1040",
-                      label_visibility="collapsed")
-    rows = [([c, a.name, a.type, money(led.balance(c))], "") for c, a in sorted(led.accounts.items())
+# =============================================================== page: Reports
+def page_reports(led, per):
+    with st.container(key="nav_rep"):
+        which = st.radio("Report", ["Trial Balance", "Income Statement", "Balance Sheet", "Month-wise Summary"],
+                         horizontal=True, key="report_pick", label_visibility="collapsed")
+    if which == "Month-wise Summary":
+        return report_months(led)
+    res = compute(led, per)
+    rows = res["rows"]
+    st.html(f'<div class="perlabel">{esc(which)} - <b>{esc(per["label"])}</b></div>')
+
+    def items(typ, key):
+        return [(["    " + r["name"], money(r[key])], "") for c, r in sorted(rows.items())
+                if r["type"] == typ and r[key] != 0]
+
+    def head(label):
+        return ([label, ""], "head")
+
+    def total(label, amount):
+        return ([label, money(amount)], "sub")
+
+    if which == "Trial Balance":
+        out, o_sum, d_sum, c_sum, cdr, ccr = [], Z, Z, Z, Z, Z
+        for c, r in sorted(rows.items()):
+            if r["open"] == 0 and r["dr"] == 0 and r["cr"] == 0:
+                continue
+            o_sum += r["open"]
+            d_sum += r["dr"]
+            c_sum += r["cr"]
+            cdr += r["close"] if r["close"] > 0 else Z
+            ccr += -r["close"] if r["close"] < 0 else Z
+            out.append(([c + "  " + r["name"], drcr(r["open"]), money(r["dr"]) if r["dr"] else "",
+                         money(r["cr"]) if r["cr"] else "", money(r["close"]) if r["close"] > 0 else "",
+                         money(-r["close"]) if r["close"] < 0 else ""], ""))
+        if res["retained"] != 0:
+            ret = res["retained"]  # credit balance carried in from earlier months
+            o_sum -= ret
+            ccr += ret
+            out.append((["Retained Earnings (previous months)", drcr(-ret), "", "", "", money(ret)], ""))
+        out.append((["TOTAL", drcr(o_sum), money(d_sum), money(c_sum), money(cdr), money(ccr)], "sub"))
+        show_html(html_table(["Account", "Opening", "Debit", "Credit", "Closing Dr", "Closing Cr"], out, right=(1, 2, 3, 4, 5)))
+        ok = d_sum == c_sum and cdr == ccr
+        (st.success if ok else st.error)("Balanced" if ok else "NOT BALANCED")
+    elif which == "Income Statement":
+        out = [head("REVENUE")] + items("Revenue", "nat_move") + [total("Total Revenue", res["revenue"])]
+        out += [head("EXPENSES")] + items("Expense", "nat_move") + [total("Total Expenses", res["expense"])]
+        out.append((["NET PROFIT" if res["net"] >= 0 else "NET LOSS", money(abs(res["net"]))], "sub"))
+        show_html(html_table(["Item", "Amount"], out, right=(1,)))
+    else:
+        out = [head("ASSETS")] + items("Asset", "nat_close") + [total("Total Assets", res["assets"])]
+        out += [head("LIABILITIES")] + items("Liability", "nat_close") + [total("Total Liabilities", res["liabilities"])]
+        out += [head("EQUITY")] + items("Equity", "nat_close")
+        if res["retained"] != 0:
+            out.append((["    Retained Earnings (previous months)", money(res["retained"])], ""))
+        out.append((["    Net profit / (loss) - " + per["label"], money(res["net"])], ""))
+        out.append(total("Total Equity", res["equity"]))
+        out.append(total("Liabilities + Equity", res["liabilities"] + res["equity"]))
+        show_html(html_table(["Item", "Amount"], out, right=(1,)))
+        ok = res["assets"] == res["liabilities"] + res["equity"]
+        (st.success if ok else st.error)("Assets = Liabilities + Equity" if ok else "The equation does NOT balance")
+
+
+def report_months(led):
+    months = sorted({e.date[:7] for e in led.entries} | {date.today().strftime("%Y-%m")})
+    out = []
+    for ym in months:
+        p = month_period(int(ym[:4]), int(ym[5:7]))
+        r = compute_raw(led, p)
+        n = sum(1 for e in led.entries if e.date[:7] == ym)
+        out.append(([p["label"], str(n), money(r["revenue"]), money(r["expense"]), money(r["net"]),
+                     money(r["assets"]), money(r["liabilities"]), money(r["equity"])], ""))
+    out.reverse()
+    show_html(html_table(["Month", "Entries", "Revenue", "Expenses", "Net Profit", "Assets", "Liabilities", "Equity"],
+                         out, right=(1, 2, 3, 4, 5, 6, 7)))
+    st.caption("Assets / Liabilities / Equity = us mahine ke end par closing balance.")
+
+
+# =============================================================== page: More  (accounts, transfer, history, backup)
+def tool_accounts(led, per):
+    res = compute(led, per)
+    q = st.text_input("Search accounts", key="acct_search", placeholder="🔎 e.g. bank or 1040", label_visibility="collapsed")
+    rows = [([c, a.name, a.type, money(res["rows"][c]["nat_close"])], "") for c, a in sorted(led.accounts.items())
             if not q or q.lower() in c.lower() or q.lower() in a.name.lower()]
-    show_html(html_table(["Code", "Account", "Type", "Balance"], rows, right=(3,)))
-    st.caption("Kisi account ki ledger dekhni ho to upar menu me 📒 Ledger par jayein.")
-
+    st.html(f'<div class="perlabel">Closing balance - <b>{esc(per["label"])}</b></div>')
+    show_html(html_table(["Code", "Account", "Type", "Balance"], rows, right=(3,), code_cols=(0,)))
     with st.expander("Add a new account"):
         with st.form("add_account_form", clear_on_submit=True):
             code = st.text_input("Code")
@@ -1100,46 +1301,49 @@ def page_accounts(led):
                     st.rerun()
 
 
-def page_reports(led):
-    with st.container(key="nav_rep"):
-        which = st.radio("Report", ["Trial Balance", "Income Statement", "Balance Sheet"], horizontal=True,
-                         key="report_pick", label_visibility="collapsed")
-    t = totals(led)
-    net = t["Revenue"] - t["Expense"]
+def tool_transfer(led, per):
+    st.subheader("Initial investment (opening transaction)")
+    with st.form("initial_form", clear_on_submit=True):
+        assets, equity = acct_options(led, "Asset"), acct_options(led, "Equity")
+        amt = st.text_input("Amount invested by owner")
+        dep = st.selectbox("Deposit into", assets, index=default_index(assets, led, "1010"))
+        cap = st.selectbox("Capital account", equity, index=default_index(equity, led, "3000"))
+        idate = st.date_input("Date", value=date.today())
+        if st.form_submit_button("Post initial investment", key="initial_submit"):
+            try:
+                a = parse_amount(amt)
+                if a is None or not dep or not cap:
+                    raise ValueError("Please fill in the amount and both accounts")
+                e = led.initial_investment(a, label_code(dep), label_code(cap), entry_date=idate.isoformat())
+            except (ValueError, InvalidOperation) as err:
+                st.error(str(err))
+            else:
+                save_all(led)
+                flash("success", f"Initial investment posted as entry {ecode(led, e.id)}.")
+                st.rerun()
+    st.subheader("Transfer money between accounts")
+    with st.form("transfer_form", clear_on_submit=True):
+        assets = acct_options(led, "Asset")
+        src = st.selectbox("From", assets, index=default_index(assets, led, "1010"))
+        dst = st.selectbox("To", assets, index=default_index(assets, led, "1020"))
+        amt = st.text_input("Amount")
+        note = st.text_input("Description / note (optional)")
+        tdate = st.date_input("Date", value=date.today())
+        if st.form_submit_button("Post transfer", key="transfer_submit"):
+            try:
+                a = parse_amount(amt)
+                if a is None or not src or not dst:
+                    raise ValueError("Please fill in the amount and both accounts")
+                e = led.transfer(label_code(src), label_code(dst), a, note.strip(), entry_date=tdate.isoformat())
+            except (ValueError, InvalidOperation) as err:
+                st.error(str(err))
+            else:
+                save_all(led)
+                flash("success", f"Transfer posted as entry {ecode(led, e.id)}.")
+                st.rerun()
 
-    def items(typ):
-        return [(["    " + a.name, money(led.balance(c))], "") for c, a in sorted(led.accounts.items())
-                if a.type == typ and led.balance(c) != 0]
 
-    def head(label):
-        return ([label, ""], "head")
-
-    def total(label, amount):
-        return ([label, money(amount)], "sub")
-
-    if which == "Trial Balance":
-        rows, tdr, tcr = led.trial_balance()
-        out = [([c, n, money(d) if d else "", money(k) if k else ""], "") for c, n, d, k in rows]
-        out.append((["", "TOTAL", money(tdr), money(tcr)], "sub"))
-        show_html(html_table(["Code", "Account", "Debit", "Credit"], out, right=(2, 3)))
-        (st.success if tdr == tcr else st.error)("Balanced" if tdr == tcr else "NOT BALANCED")
-    elif which == "Income Statement":
-        out = [head("REVENUE")] + items("Revenue") + [total("Total Revenue", t["Revenue"])]
-        out += [head("EXPENSES")] + items("Expense") + [total("Total Expenses", t["Expense"])]
-        out.append((["NET PROFIT" if net >= 0 else "NET LOSS", money(abs(net))], "sub"))
-        show_html(html_table(["Item", "Amount"], out, right=(1,)))
-    else:
-        out = [head("ASSETS")] + items("Asset") + [total("Total Assets", t["Asset"])]
-        out += [head("LIABILITIES")] + items("Liability") + [total("Total Liabilities", t["Liability"])]
-        out += [head("EQUITY")] + items("Equity") + [
-            (["    Net profit / (loss) for the period", money(net)], ""),
-            total("Total Equity", t["Equity"] + net)]
-        show_html(html_table(["Item", "Amount"], out, right=(1,)))
-        ok = t["Asset"] == t["Liability"] + t["Equity"] + net
-        (st.success if ok else st.error)("Assets = Liabilities + Equity" if ok else "The equation does NOT balance")
-
-
-def page_history(led):
+def tool_history(led, per):
     if not led.audit_log:
         st.info("No entry edits have been recorded.")
         return
@@ -1149,22 +1353,22 @@ def page_history(led):
         what = f"Date: {b.get('date')} -> {af.get('date')}\nDescription: {b.get('description')} -> {af.get('description')}"
         if b.get("lines") != af.get("lines"):
             what += "\nAccounts / amounts changed"
-        rows.append(([a.get("timestamp", ""), f"#{a.get('entry_id')}", what], ""))
-    show_html(html_table(["When", "Entry", "What changed"], rows))
+        rows.append(([a.get("timestamp", ""), ecode(led, a.get("entry_id")), what], ""))
+    show_html(html_table(["When", "Entry", "What changed"], rows, code_cols=(1,)))
     st.caption("Open an entry in the Journal page to see its full before/after lines.")
 
 
-def page_backup(led):
+def tool_backup(led, per):
     ss = st.session_state
     st.subheader("Backup")
     st.caption("Your data is stored " + ("in the online database." if not STORAGE.local else "in files on this computer.")
-               + " Download a backup copy now and then.")
+               + " Download a backup copy now and then. (Backup = poori history.)")
     st.download_button("Download data backup (JSON)", ledger_to_text(led).encode("utf-8"),
                        file_name=f"accounting_data_{date.today().isoformat()}.json",
                        mime="application/json", key="dl_json")
 
     st.subheader("PDF report")
-    st.caption("PDF ab sirf yahan se banti hai (har entry par nahi) - isi se entry post tez ho gayi.")
+    st.caption("PDF sirf yahan se banti hai (har entry par nahi) - isi se entry post tez hai.")
     if st.button("Create PDF report", key="make_pdf"):
         data, err = build_pdf(led)
         if data:
@@ -1200,28 +1404,33 @@ def page_backup(led):
                 st.rerun()
 
 
-# =============================================================== page
+MORE = {"🏷️ Accounts": tool_accounts, "🔁 Transfer / Opening": tool_transfer,
+        "🕘 History": tool_history, "💾 Backup": tool_backup}
+
+
+def page_more(led, per):
+    with st.container(key="nav_more"):
+        pick = st.radio("More", list(MORE), horizontal=True, key="more_pick", label_visibility="collapsed")
+    MORE[pick](led, per)
+
+
+# =============================================================== page shell
 PAGES = {
-    "➕ Nayi Entry": page_new_entry,
+    "➕ Entry": page_entry,
     "📖 Journal": page_journal,
     "📒 Ledger": page_ledger,
-    "🏷️ Accounts": page_accounts,
     "📊 Reports": page_reports,
-    "🕘 History": page_history,
-    "💾 Backup": page_backup,
+    "⚙️ More": page_more,
 }
 
 
-def kpi_html(led):
-    t = totals(led)
-    net = t["Revenue"] - t["Expense"]
-    loss = " loss" if net < 0 else ""
-    cards = [("k1", "Total Assets", t["Asset"]), ("k2", "Liabilities", t["Liability"]),
-             ("k3", "Equity (incl. profit)", t["Equity"] + net),
-             (f"k4{loss}", "Net Loss" if net < 0 else "Net Profit", net)]
+def kpi_html(res):
+    cards = [("30,167,253", "Total Assets", res["assets"]), ("255,46,136", "Liabilities", res["liabilities"]),
+             ("150,130,255", "Equity (incl. profit)", res["equity"]),
+             ("52,214,160" if res["net"] >= 0 else "255,46,136", "Net Profit" if res["net"] >= 0 else "Net Loss", res["net"])]
     return '<div class="kpis">' + "".join(
-        f'<div class="kpi {c}"><div class="l">{esc(l)}</div><div class="v">{esc(money(v))}</div></div>'
-        for c, l, v in cards) + "</div>"
+        f'<div class="kpi" style="--k:{k}"><div class="l">{esc(l)}</div><div class="v">{esc(money(v))}</div></div>'
+        for k, l, v in cards) + "</div>"
 
 
 def main():
@@ -1229,17 +1438,18 @@ def main():
     check_login()
     led = get_ledger()
     ss = st.session_state
+    has_login = bool(secret("APP_PASSWORD"))
 
-    top = st.columns([8, 1, 1] if secret("APP_PASSWORD") else [9, 1])
-    top[0].html(f'<div class="hero"><div class="t">📒 Simple Accounting</div>'
-                f'<div class="s">{esc(date.today().strftime("%A, %d %B %Y"))}</div></div>')
-    top[1].button("🔄", key="refresh", on_click=drop_cache, help="Data dobara load karein (doosre device ki entries dekhne ke liye)")
-    if secret("APP_PASSWORD") and top[2].button("Log out", key="logout"):
-        ss["auth_ok"] = False
-        drop_cache()
-        st.rerun()
-
-    st.html(kpi_html(led))
+    with st.container(key="topbar"):
+        top = st.columns([8, 1, 1] if has_login else [8, 1])
+        top[0].html(f'<div class="brand"><div class="logo">◆</div><div><div class="bt">Simple <b>Accounting</b></div>'
+                    f'<div class="bs">{esc(date.today().strftime("%A, %d %B %Y"))}</div></div></div>')
+        top[1].button("⟳", key="refresh", on_click=drop_cache,
+                      help="Data dobara load karein (doosre device ki entries dekhne ke liye)")
+        if has_login and top[2].button("⏻", key="logout", help="Log out"):
+            ss["auth_ok"] = False
+            drop_cache()
+            st.rerun()
 
     f = ss.pop("flash", None)
     if f:
@@ -1250,7 +1460,12 @@ def main():
 
     with st.container(key="nav"):
         page = st.radio("Page", list(PAGES), horizontal=True, key="page", label_visibility="collapsed")
-    PAGES[page](led)  # only the page you are looking at is built - the others cost nothing
+
+    per = ALL_PERIOD
+    if page != "➕ Entry":   # the entry screen stays clean; every other screen follows the chosen month
+        per = period_bar(led)
+        st.html(kpi_html(compute(led, per)))
+    PAGES[page](led, per)
     components.html(KEYPAD_HTML, height=0)
 
 
