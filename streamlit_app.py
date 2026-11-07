@@ -1089,11 +1089,24 @@ def edit_panel(led, e):
         st.rerun()
 
 
+def _jump_month(ym):
+    st.session_state["per_mode"] = "pick"
+    st.session_state["per_pick"] = ym
+
+
 def page_journal(led, per):
     codes = entry_codes(led)
     pool = [e for e in led.entries if in_period(e.date, per)]
     if not pool:
         st.info(f"{per['label']} me koi entry nahi.")
+        counts = Counter(e.date[:7] for e in led.entries)
+        if counts:
+            st.caption("Entries in mahinon me mojood hain - kholne ke liye dabayein:")
+            cols = st.columns(min(len(counts), 4))
+            for i, (ym, n) in enumerate(sorted(counts.items(), reverse=True)[:4]):
+                cols[i].button(f"{ym_label(ym)} ({n})", key=f"jump_{ym}", on_click=_jump_month, args=(ym,))
+        else:
+            st.caption("Is app ke data me abhi koi entry hi nahi hai - sahi data file / database check karein.")
         return
     c1, c2 = st.columns([3, 1])
     q = c1.text_input("Search", key="journal_q", label_visibility="collapsed",
@@ -2434,6 +2447,9 @@ def main():
     per = ALL_PERIOD
     if page != "➕ Entry":   # the entry screen stays clean; every other screen follows the chosen month
         per = period_bar(led)
+        n_in = sum(1 for e in led.entries if in_period(e.date, per))
+        latest = max((e.date for e in led.entries), default="-")
+        st.caption(f"📋 {per['label']}: {n_in} entries · kul {len(led.entries)} · sabse nayi entry: {latest}")
         if page != "🎯 Budget":
             st.html(kpi_html(compute(led, per)))
     PAGES[page](led, per)
