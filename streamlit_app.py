@@ -20,6 +20,7 @@ Month-wise books:
 
 Needs Streamlit 1.37 or newer (pip install -U streamlit).
 """
+import calendar
 import csv
 import hashlib
 import html as _html
@@ -34,6 +35,8 @@ from contextlib import redirect_stdout
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
+import altair as alt
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -95,7 +98,8 @@ def get_storage():
     url = secret("DATABASE_URL")
     if url:
         return PostgresStorage(url)
-    return FileStorage({"ledger": DATA_FILE, "pin": SECURITY_FILE})
+    bf = os.path.join(os.path.dirname(os.path.abspath(DATA_FILE)), "budget_data.json")
+    return FileStorage({"ledger": DATA_FILE, "pin": SECURITY_FILE, "budget": bf})
 
 
 STORAGE = get_storage()
@@ -284,6 +288,34 @@ button[data-testid="stBaseButton-primary"], button[kind="primary"] { background:
 """
 CSS += "".join(f'[class*="st-key-pk_{i}_"]{{--c:{type_rgb(t)};}}\n' for i, t in enumerate(TYPES))
 
+CSS += """
+.bhero { --g:100,116,139; --gt:156,172,196; border:1px solid rgba(var(--g),.55); border-radius:20px; padding:1rem 1.2rem; margin:.4rem 0 .8rem;
+  background:linear-gradient(135deg,rgba(var(--g),.18),rgba(255,255,255,.02)); box-shadow:0 0 44px -22px rgb(var(--g)); }
+.bhero .row { display:flex; justify-content:space-between; gap:1rem; flex-wrap:wrap; align-items:flex-end; }
+.bhero .l { font-size:.68rem; letter-spacing:.1em; color:var(--mut); font-weight:700; text-transform:uppercase; }
+.bhero .v { font-size:1.9rem; font-weight:800; font-variant-numeric:tabular-nums; }
+.bhero .v.g { color:rgb(var(--gt)); }
+.bhero .pc { font-size:2.3rem; font-weight:900; color:rgb(var(--gt)); line-height:1; }
+.bbar { height:14px; border-radius:99px; background:rgba(255,255,255,.08); overflow:hidden; margin:.7rem 0 .45rem; }
+.bbar i { display:block; height:100%; border-radius:99px; background:linear-gradient(90deg,rgba(var(--g),.6),rgb(var(--g)));
+  box-shadow:0 0 14px rgb(var(--g)); transition:width .3s ease; }
+.bhero .note { font-size:.84rem; color:var(--mut); } .bhero .note b { color:rgb(var(--gt)); }
+.legend { display:flex; gap:.8rem; flex-wrap:wrap; font-size:.72rem; color:var(--mut); margin-top:.4rem; }
+.legend span::before { content:""; display:inline-block; width:.6rem; height:.6rem; border-radius:3px; background:var(--lc); margin-right:.3rem; }
+.alertbox { border:1px solid rgba(179,18,59,.85); background:rgba(179,18,59,.15); border-radius:16px; padding:.8rem 1rem; margin:.6rem 0; }
+.alertbox b { color:#ff6f91; }
+.fcast { --g:100,116,139; --gt:156,172,196; border-radius:16px; padding:.75rem 1rem; margin:.5rem 0;
+  border:1px solid rgba(var(--g),.55); background:rgba(var(--g),.10); } .fcast b { color:rgb(var(--gt)); }
+.chip { display:inline-block; padding:.12rem .6rem; border-radius:99px; font-size:.74rem; font-weight:700; white-space:nowrap;
+  background:rgba(var(--g),.16); color:rgb(var(--gt)); border:1px solid rgba(var(--g),.5); }
+.pbar { min-width:80px; height:8px; border-radius:99px; background:rgba(255,255,255,.08); overflow:hidden; }
+.pbar i { display:block; height:100%; border-radius:99px; background:rgb(var(--g)); }
+.up { color:#ff6f8f; font-weight:700; } .down { color:#34d6a0; font-weight:700; } .same { color:var(--mut); font-weight:700; }
+[data-testid="stDataFrame"], [data-testid="stDataEditor"] { border:1px solid var(--line); border-radius:14px; overflow:hidden; }
+@media (max-width: 700px) { .bhero .v { font-size:1.35rem; } .bhero .pc { font-size:1.7rem; } }
+"""
+
+
 # JS runs inside the page itself: number keypad on phones + cursor jumps into the new line's Debit box on desktop.
 _PARENT_JS = r"""
 (function () {
@@ -314,7 +346,7 @@ def esc(x):
     return _html.escape(str(x)).replace("$", "&#36;")
 
 
-def html_table(headers, rows, right=(), code_cols=()):
+def html_table(headers, rows, right=(), code_cols=(), raw_cols=()):
     """rows = [(cells, css_class)]. Everything is escaped; a newline becomes a line break."""
     head = "".join(f'<th class="{"r" if i in right else ""}">{esc(t)}</th>' for i, t in enumerate(headers))
     body = []
@@ -324,7 +356,8 @@ def html_table(headers, rows, right=(), code_cols=()):
             c = str(c)
             k = ("r " if i in right else "") + ("code " if i in code_cols else "") + \
                 ("neg" if i in right and c.startswith("-") else "")
-            tds += f'<td class="{k.strip()}">{esc(c).replace(chr(10), "<br>")}</td>'
+            cell = c if i in raw_cols else esc(c).replace(chr(10), "<br>")
+            tds += f'<td class="{k.strip()}">{cell}</td>'
         body.append(f'<tr class="{cls}">{tds}</tr>')
     return (f'<div class="tbl-wrap"><table class="tbl"><thead><tr>{head}</tr></thead>'
             f'<tbody>{"".join(body)}</tbody></table></div>')
@@ -552,7 +585,7 @@ def build_pdf(led):
 def drop_cache():
     """Forget the in-memory ledger so the next run reads fresh data from storage."""
     ss = st.session_state
-    for k in ("led", "_cmp", "_codes"):
+    for k in ("led", "_cmp", "_codes", "bud", "_exp", "bud_undo"):
         ss.pop(k, None)
 
 
@@ -949,7 +982,12 @@ def entry_fragment():
             st.error(str(err))
         else:
             save_all(led)
-            flash("success", f"Entry {ecode(led, e.id)} posted and saved.")
+            msg = f"Entry {ecode(led, e.id)} posted and saved."
+            try:
+                msg += budget_confirm_text(led, lines, d.isoformat())   # budget plan confirm hota hai
+            except Exception:
+                pass
+            flash("success", msg)
             clear_slip()
             st.rerun()
 
@@ -1414,11 +1452,943 @@ def page_more(led, per):
     MORE[pick](led, per)
 
 
+# =============================================================== BUDGET (monthly spending plan - reads the ledger, never duplicates it)
+BUDGET_KEY = "budget"
+MOVE_KINDS = ["Savings", "Investment", "Receivable", "Payable", "Other"]
+MOVE_LABEL = {"Savings": "💰 Savings", "Investment": "📈 Investment", "Receivable": "🤝 Account Receivable",
+              "Payable": "🧾 Account Payable", "Other": "📦 Other"}
+PLAN_MODES = ["Fixed", "Variable", "Daily"]
+MODE_LABEL = {"Fixed": "📌 Fixed (pakka)", "Variable": "🔀 Variable (andaza)", "Daily": "📅 Daily (rozana)"}
+SRC_TYPES = ["Savings se", "Udhaar (wapis dena hai)"]
+C_BLUE, C_ROSE, C_ORANGE, C_RED, C_MAROON, C_GREEN = "#1ea7fd", "#ff2e88", "#ffbf69", "#ff4d4d", "#b3123b", "#34d6a0"
+PALETTE = ["#1ea7fd", "#ff2e88", "#9682ff", "#34d6a0", "#ffb040", "#5fd4ff", "#ff7ab8", "#b9a8ff"]
+
+
+def dnum(v):
+    """Anything -> Decimal (blank / NaN / junk -> 0)."""
+    try:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return Z
+        if not isinstance(v, (str, Decimal)) and pd.isna(v):
+            return Z
+        d = Decimal(str(v))
+        return d if d.is_finite() else Z
+    except (InvalidOperation, ValueError, TypeError):
+        return Z
+
+
+def to_iso(v):
+    try:
+        if v is None or pd.isna(v):
+            return date.today().isoformat()
+    except (TypeError, ValueError):
+        pass
+    if isinstance(v, datetime):
+        return v.date().isoformat()
+    if isinstance(v, date):
+        return v.isoformat()
+    try:
+        return pd.to_datetime(v).date().isoformat()
+    except Exception:
+        return date.today().isoformat()
+
+
+def _txt(v):
+    if v is None or (not isinstance(v, str) and pd.isna(v)):
+        return ""
+    return str(v).strip()
+
+
+def new_month():
+    return {"opening": "0", "incomes": [], "moves": [], "shortfalls": [], "plans": []}
+
+
+def shift_ym(ym, delta):
+    t = int(ym[:4]) * 12 + (int(ym[5:7]) - 1) + delta
+    return f"{t // 12}-{t % 12 + 1:02d}"
+
+
+def ym_label(ym):
+    return month_period(int(ym[:4]), int(ym[5:7]))["label"]
+
+
+def short_label(ym):
+    return ym_label(ym)[:3] + " " + ym[2:4]
+
+
+def plan_total(p):
+    if p.get("mode") == "Daily":
+        return dnum(p.get("per_day")) * dnum(p.get("days"))
+    return dnum(p.get("amount"))
+
+
+# ---------------------------------------------------------------- budget storage (own key, own undo stack)
+def load_budget():
+    ss = st.session_state
+    try:
+        text, ver = STORAGE.read(BUDGET_KEY)
+    except Exception as err:
+        ss["bud_warn"] = f"Budget ka data load nahi ho saka ({err}). Abhi ke liye sirf is session me kaam hoga."
+        ss["budget_version"] = 0
+        return {"months": {}}
+    ss["budget_version"] = ver
+    if not text:
+        return {"months": {}}
+    try:
+        data = json.loads(text)
+        data.setdefault("months", {})
+        return data
+    except Exception as err:
+        ss["bud_warn"] = f"Budget file parh nahi saka ({err})."
+        return {"months": {}}
+
+
+def get_budget():
+    ss = st.session_state
+    if "bud" not in ss:
+        ss["bud"] = load_budget()
+    return ss["bud"]
+
+
+def save_budget():
+    ss = st.session_state
+    try:
+        ss["budget_version"] = STORAGE.write(BUDGET_KEY, json.dumps(ss["bud"], indent=1), ss.get("budget_version", 0))
+        ss.pop("bud_warn", None)
+    except ConflictError:
+        ss.pop("bud", None)
+        ss["bud_warn"] = "Doosre device par budget badal chuka tha - aap ka akhri badlaav save nahi hua. Dobara try karein."
+    except Exception as err:
+        ss["bud_warn"] = f"Budget save nahi ho saka ({err})."
+
+
+def bud_push_undo():
+    ss = st.session_state
+    stack = ss.setdefault("bud_undo", [])
+    stack.append(json.dumps(ss["bud"]))
+    del stack[:-30]
+
+
+def bud_undo():
+    ss = st.session_state
+    stack = ss.get("bud_undo") or []
+    if stack:
+        ss["bud"] = json.loads(stack.pop())
+        save_budget()
+
+
+def bud_month(bud, ym):
+    m = bud["months"].setdefault(ym, new_month())
+    for k, v in new_month().items():
+        m.setdefault(k, v)
+    return m
+
+
+def bud_append(ym, key, item):
+    bud = get_budget()
+    bud_push_undo()
+    bud_month(bud, ym)[key].append(item)
+    save_budget()
+
+
+# ---------------------------------------------------------------- budget maths
+def expense_index(led):
+    """({ym: {account: spent}}, {ym: {date: spent}}) from the ledger - one pass, cached until the ledger changes."""
+    ss = st.session_state
+    m = ss.get("_exp")
+    if m and m[0] == ss.get("rev", 0):
+        return m[1]
+    by_month, daily = {}, {}
+    for e in led.entries:
+        ym = e.date[:7]
+        for ln in e.lines:
+            a = led.accounts.get(ln["account"])
+            if not a or a.type != "Expense":
+                continue
+            amt = Decimal(ln["debit"]) - Decimal(ln["credit"])
+            bm = by_month.setdefault(ym, {})
+            bm[ln["account"]] = bm.get(ln["account"], Z) + amt
+            dd = daily.setdefault(ym, {})
+            dd[e.date] = dd.get(e.date, Z) + amt
+    ss["_exp"] = (ss.get("rev", 0), (by_month, daily))
+    return by_month, daily
+
+
+def _calc(d, carry_in, actual):
+    income = sum((dnum(x.get("amount")) for x in d["incomes"]), Z)
+    moves, by_kind = Z, {}
+    for x in d["moves"]:
+        a = dnum(x.get("amount"))
+        moves += a
+        k = x.get("kind", "Other")
+        by_kind[k] = by_kind.get(k, Z) + a
+    cover = sum((dnum(x.get("amount")) for x in d["shortfalls"]), Z)
+    opening = dnum(d.get("opening"))
+    S = income - moves + cover + opening + carry_in          # money that may be spent this month
+    planned_by = {}
+    for p in d["plans"]:
+        planned_by[p.get("account")] = planned_by.get(p.get("account"), Z) + plan_total(p)
+    A = sum(actual.values(), Z)
+    P = sum(planned_by.values(), Z)
+    codes = set(actual) | set(planned_by)
+    F = sum((max(planned_by.get(c, Z), actual.get(c, Z)) for c in codes), Z)          # forecast spend
+    reserved = sum((max(planned_by.get(c, Z) - actual.get(c, Z), Z) for c in codes), Z)  # planned, not yet spent
+    remaining = S - A
+    has = bool(d["incomes"] or d["moves"] or d["plans"] or d["shortfalls"] or opening != 0 or carry_in != 0)
+    return {"income": income, "moves": moves, "moves_by_kind": by_kind, "cover": cover, "opening": opening,
+            "carry_in": carry_in, "S": S, "actual": actual, "A": A, "planned_by": planned_by, "P": P,
+            "forecast": F, "forecast_left": S - F, "reserved": reserved, "remaining": remaining, "has": has,
+            "unplanned": sum((v for c, v in actual.items() if c not in planned_by), Z),
+            "pct": (remaining / S * 100) if S > 0 else None}
+
+
+def budget_month(led, bud, ym):
+    """Chain month by month: what is left at the end of one month is added to the next month's budget."""
+    by_month, _ = expense_index(led)
+    months = bud["months"]
+    keys = sorted(months)
+    carry = Z
+    if keys and keys[0] <= ym:
+        m = keys[0]
+        while True:
+            d = {**new_month(), **(months.get(m) or {})}
+            res = _calc(d, carry, by_month.get(m, {}))
+            if m == ym:
+                break
+            carry = res["remaining"] if res["has"] else Z
+            m = shift_ym(m, 1)
+    else:
+        d = {**new_month(), **(months.get(ym) or {})}
+        res = _calc(d, Z, by_month.get(ym, {}))
+    res["ym"] = ym
+    res["d"] = d
+    return res
+
+
+def outstanding_udhaar(bud):
+    t = Z
+    for d in bud["months"].values():
+        for s in d.get("shortfalls", []):
+            if str(s.get("type", "")).startswith("Udhaar") and not s.get("repaid"):
+                t += dnum(s.get("amount"))
+    return t
+
+
+def status_color(remaining, pct, has):
+    """100-51% green, 50-21% light orange, 20-0% red, below 0 maroon."""
+    if not has:
+        return {"g": "100,116,139", "gt": "156,172,196", "label": "Budget abhi set nahi hua - income ya plan daalein"}
+    if remaining < 0:
+        return {"g": "179,18,59", "gt": "255,111,145", "label": "Budget se zyada kharch ho gaya (negative)"}
+    if pct is None:
+        return {"g": "100,116,139", "gt": "156,172,196", "label": "Income daalein taake budget bane"}
+    if pct > 50:
+        return {"g": "52,214,160", "gt": "52,214,160", "label": "Sab theek - budget kaafi bacha hai"}
+    if pct > 20:
+        return {"g": "255,191,105", "gt": "255,191,105", "label": "Ehtiyat - aadha budget kharch ho chuka"}
+    return {"g": "255,77,77", "gt": "255,77,77", "label": "Khabardar - budget bohat kam bacha hai"}
+
+
+def budget_confirm_text(led, lines, ds):
+    """Short text shown after a journal entry: which plan lines it confirmed."""
+    bud = get_budget()
+    ym = ds[:7]
+    if not bud["months"].get(ym):
+        return ""
+    r = budget_month(led, bud, ym)
+    parts, seen = [], set()
+    for code, dr, cr in lines:
+        a = led.accounts.get(code)
+        if not a or a.type != "Expense" or code in seen:
+            continue
+        seen.add(code)
+        p, act = r["planned_by"].get(code, Z), r["actual"].get(code, Z)
+        if p > 0:
+            parts.append(f"{a.name} {money(act)}/{money(p)}" + (" ✅" if act >= p else ""))
+        else:
+            parts.append(f"{a.name} {money(act)} (plan nahi)")
+    if not parts:
+        return ""
+    return " · Budget: " + ", ".join(parts) + f" · Bacha: {money(r['remaining'])}"
+
+
+# ---------------------------------------------------------------- html pieces
+def cards_html(cards):
+    return '<div class="kpis">' + "".join(
+        f'<div class="kpi" style="--k:{k}"><div class="l">{esc(l)}</div><div class="v">{esc(v)}</div></div>'
+        for k, l, v in cards) + "</div>"
+
+
+def hero_html(r):
+    sc = status_color(r["remaining"], r["pct"], r["has"])
+    pct = r["pct"]
+    if r["remaining"] < 0:
+        width, ptxt = 100, (f"{float(pct):.0f}%" if pct is not None else "<0%")
+    else:
+        width, ptxt = (0, "-") if pct is None else (max(0, min(100, float(pct))), f"{float(pct):.0f}%")
+    leg = "".join(f'<span style="--lc:{c}">{t}</span>' for c, t in (
+        (C_GREEN, "51-100% theek"), (C_ORANGE, "21-50% ehtiyat"), (C_RED, "0-20% khatra"), (C_MAROON, "negative")))
+    return (f'<div class="bhero" style="--g:{sc["g"]};--gt:{sc["gt"]}"><div class="row">'
+            f'<div><div class="l">Is mahine kharch kar sakte hain</div><div class="v">{esc(money(r["S"]))}</div></div>'
+            f'<div><div class="l">Abhi tak bacha hua</div><div class="v g">{esc(money(r["remaining"]))}</div></div>'
+            f'<div class="pc">{esc(ptxt)}</div></div>'
+            f'<div class="bbar"><i style="width:{width}%"></i></div>'
+            f'<div class="note"><b>{esc(sc["label"])}</b> &middot; kharch ho chuka: {esc(money(r["A"]))}</div>'
+            f'<div class="legend">{leg}</div></div>')
+
+
+def confirm_table_html(led, r, all_accounts=False):
+    codes = set(r["planned_by"]) | set(r["actual"])
+    if all_accounts:
+        codes |= {c for c, a in led.accounts.items() if a.type == "Expense"}
+    codes = sorted(codes, key=lambda c: (-r["planned_by"].get(c, Z), -r["actual"].get(c, Z), str(c)))
+    rows = []
+    tp = ta = tr = Z
+    for c in codes:
+        P, A = r["planned_by"].get(c, Z), r["actual"].get(c, Z)
+        name = led.accounts[c].name if c in led.accounts else str(c)
+        if P > 0:
+            if A <= 0:
+                chip, g, gt, ratio = "⏳ Intezaar", "100,116,139", "156,172,196", 0
+            elif A < P:
+                chip, g, gt, ratio = "◔ Jaari", "30,167,253", "30,167,253", float(A / P * 100)
+            elif A == P:
+                chip, g, gt, ratio = "✅ Poora", "52,214,160", "52,214,160", 100
+            else:
+                chip, g, gt, ratio = "⚠ Zyada", "255,77,77", "255,111,111", 100
+        elif A > 0:
+            chip, g, gt, ratio = "➕ Plan nahi", "255,191,105", "255,191,105", 100
+        else:
+            chip, g, gt, ratio = "-", "100,116,139", "156,172,196", 0
+        left = max(P - A, Z)
+        tp, ta, tr = tp + P, ta + A, tr + left
+        chip_html = f'<span class="chip" style="--g:{g};--gt:{gt}">{esc(chip)}</span>'
+        bar = f'<div class="pbar" style="--g:{g}"><i style="width:{min(ratio, 100):.0f}%"></i></div>'
+        rows.append(([name, money(P) if P else "", money(A) if A else "", money(left) if left else "", chip_html, bar], ""))
+    rows.append((["TOTAL", money(tp), money(ta), money(tr), "", ""], "sub"))
+    return html_table(["Expense", "Plan", "Kharch (confirmed)", "Baqi plan", "Status", "Progress"], rows,
+                      right=(1, 2, 3), raw_cols=(4, 5))
+
+
+# ---------------------------------------------------------------- charts (Altair - ships with Streamlit)
+def style_chart(ch, height=280):
+    return (ch.properties(height=height, background="transparent")
+            .configure_view(strokeWidth=0)
+            .configure_axis(labelColor="#9fb0c8", titleColor="#9fb0c8", gridColor="rgba(255,255,255,.07)",
+                            domainColor="rgba(255,255,255,.15)", tickColor="rgba(255,255,255,.15)")
+            .configure_legend(labelColor="#c9d4e6", titleColor="#9fb0c8", orient="bottom")
+            .configure_title(color="#e9eef7"))
+
+
+def show_chart(ch, empty="Is chart ke liye abhi data nahi hai."):
+    if ch is None:
+        st.caption(empty)
+        return
+    try:
+        st.altair_chart(ch, use_container_width=True, theme=None)
+    except TypeError:
+        st.altair_chart(ch, width="stretch", theme=None)
+
+
+def fl(x):
+    return float(x)
+
+
+def chart_donut(rows, colors=None):
+    rows = [(l, fl(v)) for l, v in rows if v > 0]
+    if not rows:
+        return None
+    df = pd.DataFrame(rows, columns=["Item", "Amount"])
+    df["Share %"] = (df["Amount"] / df["Amount"].sum() * 100).round(1)
+    dom = list(df["Item"])
+    rng = [colors.get(i, PALETTE[n % len(PALETTE)]) for n, i in enumerate(dom)] if colors else PALETTE[:len(dom)]
+    ch = alt.Chart(df).mark_arc(innerRadius=62, outerRadius=108, stroke="#07080b", strokeWidth=2).encode(
+        theta=alt.Theta("Amount:Q"),
+        color=alt.Color("Item:N", scale=alt.Scale(domain=dom, range=rng), legend=alt.Legend(title=None)),
+        tooltip=["Item:N", alt.Tooltip("Amount:Q", format=",.0f"), alt.Tooltip("Share %:Q", format=".1f")])
+    return style_chart(ch, 270)
+
+
+def chart_waterfall(r):
+    steps = []
+    for lab, val in (("Income", r["income"]), ("Carry-in", r["carry_in"] + r["opening"]), ("Cover (udhaar/savings)", r["cover"])):
+        if val != 0:
+            steps.append((lab, val))
+    for k in MOVE_KINDS:
+        v = r["moves_by_kind"].get(k, Z)
+        if v:
+            steps.append((k, -v))
+    if not steps and r["A"] == 0:
+        return None
+    rows, run = [], Z
+    for lab, dlt in steps:
+        rows.append((lab, fl(run), fl(run + dlt), "up" if dlt > 0 else "down"))
+        run += dlt
+    rows.append(("Spendable", 0.0, fl(run), "total"))
+    rows.append(("Spent", fl(run), fl(run - r["A"]), "down"))
+    left = run - r["A"]
+    rows.append(("Remaining", 0.0, fl(left), "total" if left >= 0 else "neg"))
+    df = pd.DataFrame(rows, columns=["Step", "Start", "End", "Type"])
+    order = list(df["Step"])
+    ch = alt.Chart(df).mark_bar(cornerRadius=4, size=34).encode(
+        x=alt.X("Step:N", sort=order, title=None, axis=alt.Axis(labelAngle=-25)),
+        y=alt.Y("Start:Q", title="₨"), y2="End:Q",
+        color=alt.Color("Type:N", legend=None, scale=alt.Scale(domain=["up", "down", "total", "neg"],
+                                                               range=[C_GREEN, C_ROSE, C_BLUE, C_MAROON])),
+        tooltip=["Step:N", alt.Tooltip("Start:Q", format=",.0f"), alt.Tooltip("End:Q", format=",.0f")])
+    return style_chart(ch, 290)
+
+
+def chart_plan_actual(led, r):
+    codes = sorted(set(r["planned_by"]) | set(r["actual"]), key=lambda c: -r["planned_by"].get(c, Z))
+    rows = [(led.accounts[c].name if c in led.accounts else str(c), fl(r["planned_by"].get(c, Z)), fl(r["actual"].get(c, Z)))
+            for c in codes]
+    if not rows:
+        return None
+    df = pd.DataFrame(rows, columns=["Account", "Planned", "Spent"])
+    order = list(df["Account"])
+    base = alt.Chart(df).encode(y=alt.Y("Account:N", sort=order, title=None))
+    planned = base.mark_bar(size=22, cornerRadius=4, color=C_BLUE, opacity=0.30).encode(
+        x=alt.X("Planned:Q", title="₨  (neela = plan, gulabi = kharch)"),
+        tooltip=["Account:N", alt.Tooltip("Planned:Q", format=",.0f"), alt.Tooltip("Spent:Q", format=",.0f")])
+    spent = base.mark_bar(size=10, cornerRadius=3).encode(
+        x=alt.X("Spent:Q", title="₨  (neela = plan, gulabi = kharch)"),
+        color=alt.condition("datum.Spent > datum.Planned", alt.value(C_RED), alt.value(C_ROSE)))
+    return style_chart(planned + spent, max(200, 38 * len(rows) + 50))
+
+
+def chart_share(led, r, base):
+    if not base or base <= 0:
+        return None
+    rows = [(led.accounts[c].name if c in led.accounts else str(c), fl(v / base * 100)) for c, v in r["actual"].items() if v > 0]
+    if not rows:
+        return None
+    df = pd.DataFrame(rows, columns=["Account", "Pct"]).sort_values("Pct", ascending=False)
+    df["Label"] = df["Pct"].map(lambda x: f"{x:.1f}%")
+    order = list(df["Account"])
+    b = alt.Chart(df).encode(y=alt.Y("Account:N", sort=order, title=None))
+    bars = b.mark_bar(cornerRadius=4, color=C_ROSE).encode(x=alt.X("Pct:Q", title="Income ka %"),
+                                                          tooltip=["Account:N", alt.Tooltip("Pct:Q", format=".1f")])
+    txt = b.mark_text(align="left", dx=4, color="#e9eef7").encode(x="Pct:Q", text="Label:N")
+    return style_chart(bars + txt, max(180, 34 * len(df) + 40))
+
+
+def chart_cumulative(ym, r, daily):
+    y, m = int(ym[:4]), int(ym[5:7])
+    n = calendar.monthrange(y, m)[1]
+    today = date.today()
+    upto = today.day if ym == today.strftime("%Y-%m") else (n if ym < today.strftime("%Y-%m") else 0)
+    if upto <= 0:
+        return None
+    dd = daily.get(ym, {})
+    run, rows = Z, []
+    for dday in range(1, upto + 1):
+        run += dd.get(f"{ym}-{dday:02d}", Z)
+        rows.append((dday, fl(run)))
+    df = pd.DataFrame(rows, columns=["Day", "Spent"])
+    S = fl(r["S"])
+    xs = alt.X("Day:Q", scale=alt.Scale(domain=[1, n]), title="Mahine ka din")
+    area = alt.Chart(df).mark_area(opacity=0.22, color=C_BLUE).encode(x=xs, y=alt.Y("Spent:Q", title="₨ (jama kharch)"))
+    line = alt.Chart(df).mark_line(color=C_BLUE, strokeWidth=3, point=alt.OverlayMarkDef(size=28, color=C_BLUE)).encode(
+        x=xs, y="Spent:Q", tooltip=["Day:Q", alt.Tooltip("Spent:Q", format=",.0f")])
+    layers = [area, line]
+    if S > 0:
+        pace = pd.DataFrame({"Day": [1, n], "Pace": [S / n, S]})
+        layers.append(alt.Chart(pace).mark_line(color=C_ROSE, strokeDash=[5, 4]).encode(x=xs, y="Pace:Q"))
+        layers.append(alt.Chart(pd.DataFrame({"y": [S]})).mark_rule(color=C_ORANGE, strokeDash=[7, 4]).encode(y="y:Q"))
+    return style_chart(alt.layer(*layers), 290)
+
+
+def chart_trend(led, bud, ym):
+    by_month, _ = expense_index(led)
+    months = [shift_ym(ym, -i) for i in range(5, -1, -1)]
+    tot = {}
+    for mm in months:
+        for c, v in by_month.get(mm, {}).items():
+            tot[c] = tot.get(c, Z) + v
+    top = [c for c, _ in sorted(tot.items(), key=lambda kv: -kv[1])[:6]]
+    rows = []
+    for mm in months:
+        other = Z
+        for c, v in by_month.get(mm, {}).items():
+            if c in top:
+                rows.append((short_label(mm), led.accounts[c].name, fl(v)))
+            else:
+                other += v
+        if other:
+            rows.append((short_label(mm), "Other", fl(other)))
+    if not rows:
+        return None
+    df = pd.DataFrame(rows, columns=["Month", "Account", "Amount"])
+    order = [short_label(mm) for mm in months]
+    dom = list(dict.fromkeys(df["Account"]))
+    bars = alt.Chart(df).mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3).encode(
+        x=alt.X("Month:N", sort=order, title=None), y=alt.Y("Amount:Q", title="₨ kharch"),
+        color=alt.Color("Account:N", scale=alt.Scale(domain=dom, range=PALETTE[:len(dom)]), legend=alt.Legend(title=None)),
+        tooltip=["Month:N", "Account:N", alt.Tooltip("Amount:Q", format=",.0f")])
+    inc_rows = [(short_label(mm), fl(sum((dnum(x.get("amount")) for x in (bud["months"].get(mm) or {}).get("incomes", [])), Z)))
+                for mm in months]
+    if any(v for _, v in inc_rows):
+        idf = pd.DataFrame(inc_rows, columns=["Month", "Income"])
+        line = alt.Chart(idf).mark_line(color="#ffffff", strokeWidth=2, point=True).encode(
+            x=alt.X("Month:N", sort=order), y="Income:Q", tooltip=["Month:N", alt.Tooltip("Income:Q", format=",.0f")])
+        return style_chart(bars + line, 290)
+    return style_chart(bars, 290)
+
+
+def chart_delta(led, cur, prev):
+    rows = []
+    for c in set(cur) | set(prev):
+        dl = cur.get(c, Z) - prev.get(c, Z)
+        if dl != 0:
+            rows.append((led.accounts[c].name if c in led.accounts else str(c), fl(dl)))
+    if not rows:
+        return None
+    df = pd.DataFrame(rows, columns=["Account", "Change"]).sort_values("Change", ascending=False)
+    order = list(df["Account"])
+    ch = alt.Chart(df).mark_bar(cornerRadius=4).encode(
+        y=alt.Y("Account:N", sort=order, title=None), x=alt.X("Change:Q", title="₨ farq (pichle mahine se)"),
+        color=alt.condition("datum.Change > 0", alt.value(C_ROSE), alt.value(C_GREEN)),
+        tooltip=["Account:N", alt.Tooltip("Change:Q", format=",.0f")])
+    return style_chart(ch, max(180, 34 * len(df) + 40))
+
+
+# ---------------------------------------------------------------- editable tables (add / edit / delete in one widget)
+def table_editor(ym, key, name, cols, to_rows, from_df, cfg, num_cols=(), date_cols=(), bool_cols=()):
+    ss = st.session_state
+    bud = get_budget()
+    items = (bud["months"].get(ym) or {}).get(key, [])
+    df = pd.DataFrame(to_rows(items), columns=cols)
+    for c in num_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce").astype("float64")
+    for c in date_cols:
+        df[c] = pd.to_datetime(df[c], errors="coerce").dt.date
+    for c in bool_cols:
+        df[c] = df[c].astype(bool)
+    ver = ss.get(f"ed_ver_{name}", 0)
+    kw = dict(key=f"ed_{name}_{ym}_{ver}", num_rows="dynamic", hide_index=True, column_config=cfg)
+    try:
+        edited = st.data_editor(df, use_container_width=True, **kw)
+    except TypeError:
+        edited = st.data_editor(df, width="stretch", **kw)
+    new, old = from_df(edited), from_df(df)
+    if new != old:
+        bud_push_undo()
+        bud_month(bud, ym)[key] = new
+        save_budget()
+        ss[f"ed_ver_{name}"] = ver + 1
+        st.rerun()
+
+
+def _num_cfg(label, **kw):
+    return st.column_config.NumberColumn(label, min_value=0, format="%.2f", **kw)
+
+
+def editor_incomes(ym):
+    def to_rows(items):
+        return [(x.get("date"), x.get("desc", ""), float(dnum(x.get("amount")))) for x in items]
+
+    def from_df(df):
+        out = []
+        for _, row in df.iterrows():
+            amt = dnum(row["Amount"])
+            if amt > 0:
+                out.append({"date": to_iso(row["Date"]), "desc": _txt(row["Description"]), "amount": dec_str(amt)})
+        return out
+
+    table_editor(ym, "incomes", "inc", ["Date", "Description", "Amount"], to_rows, from_df,
+                 {"Date": st.column_config.DateColumn("Date", format="DD/MM/YYYY"),
+                  "Description": st.column_config.TextColumn("Source"), "Amount": _num_cfg("Amount")},
+                 num_cols=["Amount"], date_cols=["Date"])
+
+
+def editor_moves(ym):
+    orig = {"Income": "income", "Expense budget": "withdraw"}
+    back = {v: k for k, v in orig.items()}
+
+    def to_rows(items):
+        return [(x.get("date"), x.get("kind", "Other"), float(dnum(x.get("amount"))), x.get("note", ""),
+                 back.get(x.get("origin"), "Income")) for x in items]
+
+    def from_df(df):
+        out = []
+        for _, row in df.iterrows():
+            amt, kind = dnum(row["Amount"]), _txt(row["Kind"])
+            if amt > 0 and kind in MOVE_KINDS:
+                out.append({"date": to_iso(row["Date"]), "kind": kind, "amount": dec_str(amt), "note": _txt(row["Note"]),
+                            "origin": orig.get(_txt(row["From"]), "income")})
+        return out
+
+    table_editor(ym, "moves", "mov", ["Date", "Kind", "Amount", "Note", "From"], to_rows, from_df,
+                 {"Date": st.column_config.DateColumn("Date", format="DD/MM/YYYY"),
+                  "Kind": st.column_config.SelectboxColumn("Kahan gaya", options=MOVE_KINDS, required=True),
+                  "Amount": _num_cfg("Amount"), "Note": st.column_config.TextColumn("Note"),
+                  "From": st.column_config.SelectboxColumn("Kahan se", options=list(orig), required=True)},
+                 num_cols=["Amount"], date_cols=["Date"])
+
+
+def editor_shortfalls(ym):
+    def to_rows(items):
+        return [(x.get("date"), float(dnum(x.get("amount"))), x.get("source", ""), x.get("type", SRC_TYPES[1]),
+                 bool(x.get("repaid")), x.get("note", "")) for x in items]
+
+    def from_df(df):
+        out = []
+        for _, row in df.iterrows():
+            amt = dnum(row["Amount"])
+            if amt > 0:
+                typ = _txt(row["Type"])
+                out.append({"date": to_iso(row["Date"]), "amount": dec_str(amt), "source": _txt(row["Source"]),
+                            "type": typ if typ in SRC_TYPES else SRC_TYPES[1],
+                            "repaid": bool(row["Repaid"]) if not pd.isna(row["Repaid"]) else False, "note": _txt(row["Note"])})
+        return out
+
+    table_editor(ym, "shortfalls", "sho", ["Date", "Amount", "Source", "Type", "Repaid", "Note"], to_rows, from_df,
+                 {"Date": st.column_config.DateColumn("Date", format="DD/MM/YYYY"), "Amount": _num_cfg("Amount"),
+                  "Source": st.column_config.TextColumn("Kis se / kahan se"),
+                  "Type": st.column_config.SelectboxColumn("Zariya", options=SRC_TYPES, required=True),
+                  "Repaid": st.column_config.CheckboxColumn("Chuka diya?"), "Note": st.column_config.TextColumn("Note")},
+                 num_cols=["Amount"], date_cols=["Date"], bool_cols=["Repaid"])
+
+
+def editor_plans(led, ym):
+    opts = acct_options(led, "Expense")
+
+    def to_rows(items):
+        return [(acct_label(led, x.get("account")) or str(x.get("account")), x.get("name", ""), x.get("mode", "Fixed"),
+                 float(dnum(x.get("amount"))), float(dnum(x.get("per_day"))), float(dnum(x.get("days"))),
+                 float(plan_total(x))) for x in items]
+
+    def from_df(df):
+        out = []
+        for _, row in df.iterrows():
+            code = label_code(_txt(row["Account"]))
+            mode = _txt(row["Type"])
+            if code not in led.accounts or led.accounts[code].type != "Expense" or mode not in PLAN_MODES:
+                continue
+            daily = mode == "Daily"
+            out.append({"account": code, "name": _txt(row["Item"]), "mode": mode,
+                        "amount": "0" if daily else dec_str(dnum(row["Amount"])),
+                        "per_day": dec_str(dnum(row["Per day"])) if daily else "0",
+                        "days": dec_str(dnum(row["Days"])) if daily else "0"})
+        return out
+
+    table_editor(ym, "plans", "pln", ["Account", "Item", "Type", "Amount", "Per day", "Days", "Total"], to_rows, from_df,
+                 {"Account": st.column_config.SelectboxColumn("Expense account", options=opts, required=True),
+                  "Item": st.column_config.TextColumn("Item"),
+                  "Type": st.column_config.SelectboxColumn("Qism", options=PLAN_MODES, required=True),
+                  "Amount": _num_cfg("Amount (fixed/variable)"), "Per day": _num_cfg("Ek din ka"),
+                  "Days": st.column_config.NumberColumn("Din", min_value=0, step=1, format="%d"),
+                  "Total": st.column_config.NumberColumn("Total", format="%.2f", disabled=True)},
+                 num_cols=["Amount", "Per day", "Days", "Total"])
+
+
+# ---------------------------------------------------------------- guided flows
+def _fill(key, val):
+    st.session_state[key] = val
+
+
+@st.fragment
+def income_flow(ym):
+    """Income dalte hi software poochta hai: savings / investment / receivable / payable me kitne jayenge."""
+    ss = st.session_state
+    led, bud = ss["led"], get_budget()
+    fk = ss.setdefault("inc_form", 0)
+
+    def k(n):
+        return f"inc_{n}_{fk}"
+
+    st.html('<div class="ptitle">1 · Income daalein &nbsp;→&nbsp; 2 · batayein kahan kahan jayegi</div>')
+    c1, c2, c3 = st.columns([2, 3, 2])
+    amt_t = c1.text_input("Amount - Income (₨)", key=k("amt"), placeholder="e.g. 100000")
+    desc = c2.text_input("Income ka source", key=k("desc"), placeholder="Salary / Freelance ...")
+    dt = c3.date_input("Date", value=date.today(), key=k("date"), format="DD/MM/YYYY")
+
+    led_rev = compute(led, month_period(int(ym[:4]), int(ym[5:7])))["revenue"]
+    booked = sum((dnum(x.get("amount")) for x in (bud["months"].get(ym) or {}).get("incomes", [])), Z)
+    if led_rev - booked > 0:
+        st.button(f"📥 Ledger ki income bharein ({money(led_rev - booked)})", key=k("fill"), on_click=_fill,
+                  args=(k("amt"), dec_str(led_rev - booked)))
+
+    owe = outstanding_udhaar(bud)
+    a1, a2 = st.columns(2)
+    sav = a1.text_input("Amount - Savings me", key=k("sav"), placeholder="0")
+    inv = a2.text_input("Amount - Investment me", key=k("inv"), placeholder="0")
+    a3, a4 = st.columns(2)
+    rec = a3.text_input("Amount - Account Receivable me (kisi ko dena)", key=k("rec"), placeholder="0")
+    pay = a4.text_input("Amount - Account Payable me (qarz chukana)", key=k("pay"), placeholder=dec_str(owe) if owe > 0 else "0")
+    if owe > 0:
+        st.caption(f"Pichla udhaar baqi hai: {money(owe)} - payable me daalna na bhoolen.")
+
+    income = amt_or_zero(amt_t)
+    alloc = amt_or_zero(sav) + amt_or_zero(inv) + amt_or_zero(rec) + amt_or_zero(pay)
+    spend = income - alloc
+    pct = (spend / income * 100) if income > 0 else None
+    sc = status_color(spend, pct, income > 0)
+    pct_txt = "" if pct is None else f" ({float(pct):.0f}%)"
+    st.html(f'<div class="fcast" style="--g:{sc["g"]};--gt:{sc["gt"]}"><b>Expense ke liye bachega: {esc(money(spend))}'
+            f'{pct_txt}</b><br><span class="lh-note">{esc(sc["label"])}</span></div>')
+    if dt.isoformat()[:7] != ym:
+        st.caption(f"Note: ye income {ym_label(dt.isoformat()[:7])} ke budget me jayegi.")
+
+    if st.button("💾 Income aur allocation save karein", key=k("save"), type="primary"):
+        if income <= 0:
+            st.error("Income ki raqam likhein.")
+        elif spend < 0:
+            st.error("Allocation income se zyada hai - raqam kam karein.")
+        else:
+            tm = dt.isoformat()[:7]
+            bud_push_undo()
+            m = bud_month(bud, tm)
+            m["incomes"].append({"date": dt.isoformat(), "desc": desc.strip(), "amount": dec_str(income)})
+            for kind, v in (("Savings", sav), ("Investment", inv), ("Receivable", rec), ("Payable", pay)):
+                a = amt_or_zero(v)
+                if a > 0:
+                    m["moves"].append({"date": dt.isoformat(), "kind": kind, "amount": dec_str(a), "note": "", "origin": "income"})
+            save_budget()
+            ss["inc_form"] = fk + 1
+            flash("success", f"Income save: {ym_label(tm)} ke liye {money(spend)} kharch budget bana.")
+            st.rerun()
+
+
+@st.fragment
+def plan_flow(ym):
+    """Fixed / Variable / Daily kharcha - software poochta hai ek din ka kitna aur kitne din."""
+    ss = st.session_state
+    led = ss["led"]
+    by_month, _ = expense_index(led)
+    fk = ss.setdefault("plan_form", 0)
+    opts = acct_options(led, "Expense")
+    if not opts:
+        st.info("Koi Expense account nahi mila.")
+        return
+
+    def k(n):
+        return f"pl_{n}_{fk}"
+
+    st.html('<div class="ptitle">➕ Naya kharcha plan karein</div>')
+    c1, c2 = st.columns(2)
+    acct = c1.selectbox("Expense account", opts, key=k("acct"))
+    name = c2.text_input("Item ka naam", key=k("name"), placeholder="e.g. University petrol")
+    code = label_code(acct)
+    last = by_month.get(shift_ym(ym, -1), {}).get(code, Z)
+    if last > 0:
+        st.caption(f"Pichle mahine is account me {money(last)} kharch hua tha.")
+    mode = st.radio("Ye kharcha kis tarah ka hai?", PLAN_MODES, horizontal=True, key=k("mode"), format_func=MODE_LABEL.get)
+    if mode == "Daily":
+        d1, d2 = st.columns(2)
+        per_day = d1.text_input("Amount - ek din ka kharcha", key=k("pd"), placeholder="e.g. 300")
+        days = d2.text_input("Is mahine kitne din?", key=k("days"), placeholder="e.g. 20")
+        total = amt_or_zero(per_day) * amt_or_zero(days)
+    else:
+        amt = st.text_input("Amount - is mahine ka kharcha", key=k("amt"), placeholder="e.g. 15000")
+        total = amt_or_zero(amt)
+    st.caption(f"Is item ka total: {money(total)}")
+    if st.button("➕ Plan me add karein", key=k("add"), type="primary"):
+        if total <= 0:
+            st.error("Amount (aur daily ho to din) likhein.")
+        else:
+            item = {"account": code, "name": name.strip(), "mode": mode, "amount": "0", "per_day": "0", "days": "0"}
+            if mode == "Daily":
+                item.update(per_day=dec_str(amt_or_zero(per_day)), days=dec_str(amt_or_zero(days)))
+            else:
+                item["amount"] = dec_str(total)
+            bud_append(ym, "plans", item)
+            ss["plan_form"] = fk + 1
+            flash("success", f"Plan add: {led.accounts[code].name} {money(total)}.")
+            st.rerun()
+
+
+def shortfall_prompt(ym, need):
+    st.html(f'<div class="alertbox"><b>⚠ Budget se {esc(money(need))} zyada kharch ho gaya.</b><br>'
+            'Ye raqam kahan se aa rahi hai? Agar udhaar hai to agli income aane par chukana parega.</div>')
+    with st.form("short_form", clear_on_submit=True):
+        c1, c2 = st.columns(2)
+        typ = c1.selectbox("Zariya", SRC_TYPES)
+        who = c2.text_input("Kis se / kahan se", placeholder="e.g. Ali bhai / Credit card")
+        amt = st.text_input("Amount - kami ki raqam", value=dec_str(need))
+        if st.form_submit_button("✅ Source save karein"):
+            a = amt_or_zero(amt)
+            if a <= 0:
+                st.error("Raqam likhein.")
+            else:
+                bud_append(ym, "shortfalls", {"date": date.today().isoformat(), "amount": dec_str(a),
+                                              "source": who.strip() or typ, "type": typ, "repaid": False, "note": ""})
+                flash("success", "Kami ka source save ho gaya - budget me add ho gaya.")
+                st.rerun()
+
+
+# ---------------------------------------------------------------- budget page
+def bud_overview(led, bud, ym, r):
+    st.html(hero_html(r))
+    if r["has"] and r["remaining"] < 0:
+        shortfall_prompt(ym, -r["remaining"])
+    st.html(cards_html([("30,167,253", "Income", money(r["income"])),
+                        ("255,46,136", "Savings / investment etc.", money(r["moves"])),
+                        ("255,176,64", "Pichla bacha + cover", money(r["carry_in"] + r["opening"] + r["cover"])),
+                        ("52,214,160", "Kharch budget", money(r["S"]))]))
+    st.html(cards_html([("150,130,255", "Plan ka total", money(r["P"])),
+                        ("255,46,136", "Kharch ho chuka", money(r["A"])),
+                        ("30,167,253", "Plan me baqi", money(r["reserved"])),
+                        ("52,214,160" if r["forecast_left"] >= 0 else "255,77,77", "Month-end andaza", money(r["forecast_left"]))]))
+
+    if r["has"]:
+        fc = r["forecast_left"]
+        if fc >= 0:
+            g, gt = "52,214,160", "52,214,160"
+            msg = (f"✅ Agar diye gaye plan ke mutabiq chale to month end par <b>{esc(money(fc))}</b> bach sakte hain. "
+                   "Jo bachega wo agle mahine ke budget me khud add ho jayega.")
+        else:
+            g, gt = "179,18,59", "255,111,145"
+            msg = (f"⚠ Plan ke mutabiq chale to month end par <b>{esc(money(-fc))}</b> ki kami (negative) hogi. "
+                   "Plan kam karein ya income / source ka intezam karein.")
+        st.html(f'<div class="fcast" style="--g:{g};--gt:{gt}">{msg}</div>')
+        gap = r["S"] - r["P"]
+        st.html(f'<div class="perlabel">Pehle socha hua budget <b>{esc(money(r["S"]))}</b> &nbsp;vs&nbsp; ab ka plan '
+                f'(fixed + variable + daily) <b>{esc(money(r["P"]))}</b> &nbsp;→&nbsp; farq '
+                f'<b style="color:{C_GREEN if gap >= 0 else C_RED}">{"+" if gap >= 0 else "-"}{esc(money(abs(gap)))}</b> '
+                f'({"plan budget se kam hai - safe side" if gap >= 0 else "plan budget se zyada hai"})</div>')
+
+    st.html('<div class="ptitle">✅ Kharch confirmation <small>journal entry karte hi khud update</small></div>')
+    show_html(confirm_table_html(led, r))
+
+    with st.expander("💸 Bachi hui raqam expense budget se nikalein (savings / investment / receivable ...)"):
+        with st.form("wd_form", clear_on_submit=True):
+            kind = st.selectbox("Kahan lagani hai", MOVE_KINDS, format_func=MOVE_LABEL.get)
+            amt = st.text_input("Amount - nikalni hai")
+            note = st.text_input("Note (optional)")
+            if st.form_submit_button("Budget se nikalein"):
+                a = amt_or_zero(amt)
+                if a <= 0:
+                    st.error("Raqam likhein.")
+                elif a > max(r["remaining"], Z):
+                    st.error(f"Abhi sirf {money(max(r['remaining'], Z))} bacha hai - us se zyada nahi nikal sakte.")
+                else:
+                    bud_append(ym, "moves", {"date": date.today().isoformat(), "kind": kind, "amount": dec_str(a),
+                                             "note": note.strip(), "origin": "withdraw"})
+                    flash("success", f"{money(a)} expense budget se {kind} me chali gayi.")
+                    st.rerun()
+    st.caption("Asal paisa kisi account me bhejna ho to Entry page par normal journal entry (ya More → Transfer) karein.")
+
+
+def bud_income(led, bud, ym, r):
+    income_flow(ym)
+    st.divider()
+    owe = outstanding_udhaar(bud)
+    if owe > 0:
+        st.html(f'<div class="alertbox"><b>Udhaar baqi: {esc(money(owe))}</b> - agli income me Account Payable me daalein.</div>')
+    st.html('<div class="ptitle">Incomes <small>edit / delete / nayi row</small></div>')
+    editor_incomes(ym)
+    st.html('<div class="ptitle">Allocations aur nikaasi <small>savings, investment, receivable, payable</small></div>')
+    editor_moves(ym)
+    st.html('<div class="ptitle">Kami ke source <small>jahan se kami poori ki</small></div>')
+    editor_shortfalls(ym)
+
+
+def bud_plan(led, bud, ym, r):
+    gap = r["S"] - r["P"]
+    st.html(cards_html([("255,176,64", "Pehle socha hua budget", money(r["S"])),
+                        ("150,130,255", "Ab ka plan (fixed+variable+daily)", money(r["P"])),
+                        ("52,214,160" if gap >= 0 else "255,77,77", "Farq", ("+" if gap >= 0 else "-") + money(abs(gap))),
+                        ("30,167,253", "Month-end andaza", money(r["forecast_left"]))]))
+    plan_flow(ym)
+    st.html('<div class="ptitle">Saare plan items <small>edit / delete / nayi row</small></div>')
+    editor_plans(led, ym)
+    st.html('<div class="ptitle">Saare Expense accounts <small>plan vs asal kharch</small></div>')
+    show_html(confirm_table_html(led, r, all_accounts=True))
+
+
+def bud_analysis(led, bud, ym, r):
+    by_month, daily = expense_index(led)
+    cur, prev = by_month.get(ym, {}), by_month.get(shift_ym(ym, -1), {})
+    base = r["income"] if r["income"] > 0 else (r["S"] if r["S"] > 0 else None)
+    tc, tp = sum(cur.values(), Z), sum(prev.values(), Z)
+    dl = tc - tp
+    pc = f"{float(dl / tp * 100):+.1f}%" if tp > 0 else "-"
+    st.html(cards_html([("255,46,136", "Is mahine kharch", money(tc)), ("30,167,253", "Pichle mahine kharch", money(tp)),
+                        ("255,77,77" if dl > 0 else "52,214,160", "Farq (₨)", ("+" if dl > 0 else "-" if dl < 0 else "") + money(abs(dl))),
+                        ("255,77,77" if dl > 0 else "52,214,160", "Farq (%)", pc)]))
+
+    rows = []
+    for c in sorted(set(cur) | set(prev), key=lambda x: -cur.get(x, Z)):
+        c_, p_ = cur.get(c, Z), prev.get(c, Z)
+        d_ = c_ - p_
+        cls, arrow, word = ("up", "▲", "badha") if d_ > 0 else ("down", "▼", "kam hua") if d_ < 0 else ("same", "━", "no change")
+        pch = f"{float(d_ / p_ * 100):+.1f}%" if p_ > 0 else ("naya" if c_ > 0 else "0%")
+        share = f"{float(c_ / base * 100):.1f}%" if base else "-"
+        diff_html = (f'<span class="{cls}">{arrow} {esc(money(abs(d_)))} ({esc(word)})</span>' if d_
+                     else '<span class="same">━ no change</span>')
+        rows.append(([led.accounts[c].name if c in led.accounts else str(c), money(p_) if p_ else "", money(c_) if c_ else "",
+                      diff_html, f'<span class="{cls}">{esc(pch)}</span>', share], ""))
+    if rows:
+        show_html(html_table(["Expense", "Pichla mahina", "Is mahina", "Farq ₨", "Farq %", "Income ka %"], rows,
+                             right=(1, 2, 3, 4, 5), raw_cols=(3, 4)))
+        if base:
+            top = sorted(((v, c) for c, v in cur.items() if v > 0), reverse=True)[:3]
+            if top:
+                st.html('<div class="perlabel">Income ka sab se zyada hissa: ' + " &nbsp;·&nbsp; ".join(
+                    f'<b>{esc(led.accounts[c].name if c in led.accounts else c)}</b> {float(v / base * 100):.1f}%' for v, c in top) + "</div>")
+    else:
+        st.info("Is mahine ya pichle mahine koi expense nahi mila.")
+
+    g1, g2 = st.columns(2)
+    with g1:
+        st.html('<div class="ptitle">Income kahan gayi</div>')
+        rows_d = [(MOVE_LABEL[k].split(" ", 1)[1], v) for k, v in r["moves_by_kind"].items() if k in MOVE_LABEL]
+        rows_d.append(("Kharch budget", max(r["S"], Z)))
+        show_chart(chart_donut(rows_d), "Income daalein to ye chart banega.")
+    with g2:
+        st.html('<div class="ptitle">Kharcha kahan gaya</div>')
+        show_chart(chart_donut([(led.accounts[c].name if c in led.accounts else str(c), v) for c, v in cur.items()]),
+                   "Is mahine abhi koi expense nahi.")
+    st.html('<div class="ptitle">Income se bacha-kharcha (waterfall)</div>')
+    show_chart(chart_waterfall(r), "Income ya kharch daalein.")
+    st.html('<div class="ptitle">Plan vs asal kharch</div>')
+    show_chart(chart_plan_actual(led, r), "Plan ya kharch daalein.")
+    g3, g4 = st.columns(2)
+    with g3:
+        st.html('<div class="ptitle">Kharch income ka kitna % kha raha hai</div>')
+        show_chart(chart_share(led, r, base), "Income daalein taake % nikle.")
+    with g4:
+        st.html('<div class="ptitle">Pichle mahine se farq</div>')
+        show_chart(chart_delta(led, cur, prev), "Pichle mahine se koi farq nahi.")
+    st.html('<div class="ptitle">Roz ka jama kharch vs budget</div>')
+    show_chart(chart_cumulative(ym, r, daily), "Is mahine abhi kharch nahi hua.")
+    st.caption("🟦 asli jama kharch &nbsp;·&nbsp; gulabi lakeer = barabar raftaar se budget ka hisaab &nbsp;·&nbsp; orange lakeer = poora budget")
+    st.html('<div class="ptitle">Pichle 6 mahine ka kharch (safed lakeer = income)</div>')
+    show_chart(chart_trend(led, bud, ym), "Abhi itna data nahi.")
+
+
+BUD_SECTIONS = {"📊 Overview": bud_overview, "💰 Income": bud_income, "🧮 Plan": bud_plan, "📈 Analysis": bud_analysis}
+
+
+def page_budget(led, per):
+    ss = st.session_state
+    bud = get_budget()
+    today_ym = date.today().strftime("%Y-%m")
+    if per["kind"] == "month":
+        ym = per["ym"]
+    else:
+        ym = today_ym
+        st.caption("Budget hamesha ek mahine ka hota hai - is mahine ka dikha rahe hain. Doosra mahina upar se chunein.")
+    if ss.get("bud_warn"):
+        st.warning(ss["bud_warn"])
+    n_undo = len(ss.get("bud_undo") or [])
+    c1, c2 = st.columns([5, 1])
+    c1.html(f'<div class="ptitle">🎯 Budget - {esc(ym_label(ym))}</div>')
+    c2.button(f"↩ Undo ({n_undo})", key="bud_undo_btn", on_click=bud_undo, disabled=n_undo == 0)
+    with st.container(key="nav_bud"):
+        sec = st.radio("Budget section", list(BUD_SECTIONS), horizontal=True, key="bud_sec", label_visibility="collapsed")
+    r = budget_month(led, bud, ym)
+    BUD_SECTIONS[sec](led, bud, ym, r)
+
+
 # =============================================================== page shell
 PAGES = {
     "➕ Entry": page_entry,
     "📖 Journal": page_journal,
     "📒 Ledger": page_ledger,
+    "🎯 Budget": page_budget,
     "📊 Reports": page_reports,
     "⚙️ More": page_more,
 }
@@ -1464,7 +2434,8 @@ def main():
     per = ALL_PERIOD
     if page != "➕ Entry":   # the entry screen stays clean; every other screen follows the chosen month
         per = period_bar(led)
-        st.html(kpi_html(compute(led, per)))
+        if page != "🎯 Budget":
+            st.html(kpi_html(compute(led, per)))
     PAGES[page](led, per)
     components.html(KEYPAD_HTML, height=0)
 
